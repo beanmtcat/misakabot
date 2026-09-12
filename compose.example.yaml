@@ -51,7 +51,7 @@ x-emby-service-environment: &emby-service-environment
   MOVIEPILOT_API_TOKEN: ${MOVIEPILOT_API_TOKEN:?Set MOVIEPILOT_API_TOKEN in .env}
   MOVIEPILOT_SQLITE_PATH: /moviepilot-config/user.db
   MOVIEPILOT_SYNC_INTERVAL_SECONDS: "1800"
-  EMBY_PATH_MAP_API_TOKEN: ${EMBY_PATH_MAP_API_TOKEN:?Set EMBY_PATH_MAP_API_TOKEN in .env}
+  EMBY_PATH_MAP_API_SECRET: ${EMBY_PATH_MAP_API_SECRET:?Set EMBY_PATH_MAP_API_SECRET in .env}
 
 services:
   misaka-bot:

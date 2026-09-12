@@ -38,7 +38,7 @@ class Settings:
     moviepilot_api_token: str = ""
     moviepilot_sqlite_path: Path | None = None
     moviepilot_sync_interval_seconds: int = 1800
-    path_map_api_token: str = ""
+    path_map_api_secret: str = ""
 
     @classmethod
     def from_environment(cls) -> "Settings":
@@ -89,5 +89,10 @@ class Settings:
             moviepilot_sync_interval_seconds=_positive_seconds(
                 "MOVIEPILOT_SYNC_INTERVAL_SECONDS", 1800
             ),
-            path_map_api_token=os.environ.get("EMBY_PATH_MAP_API_TOKEN", "").strip(),
+            # EMBY_PATH_MAP_API_TOKEN is accepted during the HMAC migration so
+            # existing deployments do not stop serving path mappings.
+            path_map_api_secret=(
+                os.environ.get("EMBY_PATH_MAP_API_SECRET", "").strip()
+                or os.environ.get("EMBY_PATH_MAP_API_TOKEN", "").strip()
+            ),
         )

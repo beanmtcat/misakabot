@@ -64,4 +64,14 @@ Docker 镜像会自动使用 `/app/web/dist`。仅在非 Docker 部署且前端�
 - `POST /emby-manager/v1/emby/login-logs/sync`：将当前 Emby 会话按会话 ID 去重写入登录日志。
 - `GET /emby-manager/v1/emby/items/{item_id}/open`：跳转至 Emby Web 的媒体详情页。
 
+`GET /emby-manager/v1/emby/nodes/{node_id}/series-paths` 供远端转存脚本拉取路径映射，不使用
+Cookie 或 Bearer Token。请求必须使用 `EMBY_PATH_MAP_API_SECRET` 计算 HMAC-SHA256，并附带：
+
+- `X-Path-Map-Timestamp`：Unix 秒级时间戳（容许前后 5 分钟）；
+- `X-Path-Map-Nonce`：每次请求唯一的随机值；
+- `X-Path-Map-Signature`：对 `GET + "\\n" + 原始路径 + "\\n" + 查询串 + "\\n" + timestamp + "\\n" + nonce` 的 HMAC-SHA256 十六进制摘要。
+
+服务端会拒绝过期、重复 nonce 或签名不匹配的请求。`auto_transfer.py` 已自动生成这些请求头；其
+`path_map_api` 配置应使用 `secret_env` 引用环境变量名，例如 `"secret_env": "EMBY_PATH_MAP_API_SECRET"`。
+
 `EMBY_BASE_URL` 仅用于服务端访问 Emby API。若 API 使用内网地址，请设置 `EMBY_WEB_BASE_URL` 为浏览器可访问的 Emby 公网地址，媒体名称跳转会使用该地址。

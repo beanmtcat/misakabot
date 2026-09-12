@@ -1,8 +1,12 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
+import hmac
 import logging
+import re
 import secrets
+import time
 from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from pathlib import Path
@@ -25,6 +29,24 @@ from .tmdb_client import TmdbClient
 
 logger = logging.getLogger(__name__)
 APP_PREFIX = "/emby-manager"
+PATH_MAP_SIGNATURE_MAX_AGE_SECONDS = 300
+PATH_MAP_NONCE_PATTERN = re.compile(r"[A-Za-z0-9_-]{16,128}")
+
+
+def _path_map_signature_payload(
+    method: str, raw_path: str, query: str, timestamp: str, nonce: str
+) -> bytes:
+    return "\n".join((method.upper(), raw_path, query, timestamp, nonce)).encode("utf-8")
+
+
+def _path_map_signature(
+    secret: str, method: str, raw_path: str, query: str, timestamp: str, nonce: str
+) -> str:
+    return hmac.new(
+        secret.encode("utf-8"),
+        _path_map_signature_payload(method, raw_path, query, timestamp, nonce),
+        hashlib.sha256,
+    ).hexdigest()
 
 
 class PolicyChange(BaseModel):
@@ -69,6 +91,8 @@ def create_app(
         settings.moviepilot_sqlite_path,
     )
     sync_lock = asyncio.Lock()
+    path_map_nonce_lock = asyncio.Lock()
+    path_map_seen_nonces: dict[str, int] = {}
     sync_status: dict[str, dict[str, object | None]] = {
         "users": {"last_success_at": None, "last_result": None},
         "series": {"last_success_at": None, "last_result": None},
@@ -353,13 +377,52 @@ def create_app(
     def list_libraries(_: str = Depends(require_admin)) -> dict[str, object]:
         return {"items": manager.list_libraries()}
 
-    async def require_path_map_api_token(request: Request) -> None:
-        expected_token = settings.path_map_api_token
-        if not expected_token:
-            raise HTTPException(status_code=503, detail="未配置路径映射 API Token")
-        scheme, _, supplied_token = request.headers.get("Authorization", "").partition(" ")
-        if scheme.lower() != "bearer" or not secrets.compare_digest(supplied_token, expected_token):
-            raise HTTPException(status_code=401, detail="路径映射 API 鉴权失败")
+    async def require_path_map_request_signature(request: Request) -> None:
+        """Authenticate the remote path-map pull without transmitting the secret."""
+        signing_secret = settings.path_map_api_secret
+        if not signing_secret:
+            raise HTTPException(status_code=503, detail="未配置路径映射 API 签名密钥")
+
+        timestamp = request.headers.get("X-Path-Map-Timestamp", "")
+        nonce = request.headers.get("X-Path-Map-Nonce", "")
+        supplied_signature = request.headers.get("X-Path-Map-Signature", "")
+        try:
+            timestamp_value = int(timestamp)
+        except ValueError:
+            raise HTTPException(status_code=401, detail="路径映射 API 请求签名无效") from None
+        now = int(time.time())
+        if (
+            abs(now - timestamp_value) > PATH_MAP_SIGNATURE_MAX_AGE_SECONDS
+            or not PATH_MAP_NONCE_PATTERN.fullmatch(nonce)
+            or not re.fullmatch(r"[0-9a-f]{64}", supplied_signature)
+        ):
+            raise HTTPException(status_code=401, detail="路径映射 API 请求签名无效")
+
+        raw_path = request.scope.get("raw_path", request.url.path.encode("utf-8")).decode(
+            "ascii", "surrogateescape"
+        )
+        expected_signature = _path_map_signature(
+            signing_secret,
+            request.method,
+            raw_path,
+            request.url.query,
+            timestamp,
+            nonce,
+        )
+        if not secrets.compare_digest(supplied_signature, expected_signature):
+            raise HTTPException(status_code=401, detail="路径映射 API 请求签名无效")
+
+        async with path_map_nonce_lock:
+            expired_nonces = [
+                known_nonce
+                for known_nonce, expires_at in path_map_seen_nonces.items()
+                if expires_at <= now
+            ]
+            for known_nonce in expired_nonces:
+                del path_map_seen_nonces[known_nonce]
+            if nonce in path_map_seen_nonces:
+                raise HTTPException(status_code=401, detail="路径映射 API 请求签名无效")
+            path_map_seen_nonces[nonce] = now + PATH_MAP_SIGNATURE_MAX_AGE_SECONDS
 
     @app.get(
         f"{APP_PREFIX}/v1/emby/nodes/{{node_id}}/series-paths",
@@ -368,7 +431,7 @@ def create_app(
     async def series_paths_for_node(
         node_id: str,
         format: str = Query("text", pattern="^(text|json)$"),
-        _: None = Depends(require_path_map_api_token),
+        _: None = Depends(require_path_map_request_signature),
     ) -> PlainTextResponse | JSONResponse:
         if format == "json":
             return JSONResponse({"items": await manager.series_path_entries_for_node(node_id)})

@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
 import json
+import hashlib
+import hmac
 import subprocess
 import shlex
 import os
+import secrets
 import sys
 import argparse
 import tempfile
@@ -11,7 +14,7 @@ from datetime import datetime
 import time
 from typing import Optional, List, Tuple, Dict
 from urllib.error import HTTPError, URLError
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 from urllib.request import Request, urlopen
 
 CONFIG_PATH = "/data/media/transfer_config.json"
@@ -237,23 +240,42 @@ def load_mapping_file(path: str):
 
 
 def refresh_mapping_file(cfg: dict, mapping_file: str) -> None:
-    """Fetch the remote node mapping and atomically replace the local file on success."""
+    """Fetch an HMAC-authenticated remote mapping and replace the local file atomically."""
     api = cfg.get("path_map_api")
     if not isinstance(api, dict):
         return
     url = str(api.get("url") or "").strip()
     node_id = str(api.get("node_id") or "").strip()
-    token = str(api.get("token") or "").strip()
-    token_env = str(api.get("token_env") or "").strip()
-    if not token and token_env:
-        token = os.environ.get(token_env, "").strip()
-    if not url or not node_id or not token:
-        raise RuntimeError("path_map_api requires url, node_id, and token or token_env")
+    secret = str(api.get("secret") or api.get("token") or "").strip()
+    secret_env = str(api.get("secret_env") or api.get("token_env") or "").strip()
+    if not secret and secret_env:
+        secret = os.environ.get(secret_env, "").strip()
+        # Compatibility for the prior configuration, where a secret was placed
+        # directly in token_env. New configurations must use secret_env instead.
+        if not secret and len(secret_env) >= 32:
+            secret = secret_env
+    if not url or not node_id or not secret:
+        raise RuntimeError("path_map_api requires url, node_id, and secret or secret_env")
     if "{node_id}" not in url:
         raise RuntimeError("path_map_api.url must contain {node_id}")
     endpoint = url.replace("{node_id}", quote(node_id, safe=""))
     timeout = int(api.get("timeout_seconds", 20))
-    request = Request(endpoint, headers={"Authorization": f"Bearer {token}", "Accept": "text/plain"})
+    endpoint_parts = urlsplit(endpoint)
+    timestamp = str(int(time.time()))
+    nonce = secrets.token_urlsafe(24)
+    signing_payload = "\n".join(
+        ("GET", endpoint_parts.path, endpoint_parts.query, timestamp, nonce)
+    ).encode("utf-8")
+    signature = hmac.new(secret.encode("utf-8"), signing_payload, hashlib.sha256).hexdigest()
+    request = Request(
+        endpoint,
+        headers={
+            "Accept": "text/plain",
+            "X-Path-Map-Timestamp": timestamp,
+            "X-Path-Map-Nonce": nonce,
+            "X-Path-Map-Signature": signature,
+        },
+    )
     try:
         with urlopen(request, timeout=timeout) as response:  # noqa: S310 - configured HTTPS endpoint
             payload = response.read(5 * 1024 * 1024 + 1)
