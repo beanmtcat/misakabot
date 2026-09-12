@@ -176,10 +176,15 @@ export default function SeriesPage({ notify, archived = false }) {
     finally { setComparisonLoading(false); }
   }
 
+  function selectDashboardState(nextState) {
+    setStateFilter((currentState) => currentState === nextState && nextState ? '' : nextState);
+    setPage(1);
+  }
+
   const episodeCount = series.reduce((sum, item) => sum + Number(item.episode_count || 0), 0);
   const sectionName = archived ? '已归档' : '追更中';
   return <section className="page-section media-section">
-    <div className="metric-grid"><article><span>{sectionName}</span><strong>{total}</strong><small>{archived ? '不会参与自动追更' : '已启用追更标记'}</small></article><article><span>今日更新</span><strong>{todayTotal}</strong><small>下次更新为今天</small></article><article><span>更新异常</span><strong>{exceptionTotal}</strong><small>本服与官方集数不一致</small></article></div>
+    <div className="metric-grid">{archived ? <><article><span>{sectionName}</span><strong>{total}</strong><small>不会参与自动追更</small></article><article><span>今日更新</span><strong>{todayTotal}</strong><small>下次更新为今天</small></article><article><span>更新异常</span><strong>{exceptionTotal}</strong><small>本服与官方集数不一致</small></article></> : <><button type="button" className={`metric-filter ${!stateFilter ? 'active' : ''}`} onClick={() => selectDashboardState('')} aria-pressed={!stateFilter}><span>追更中</span><strong>{trackedTotal}</strong><small>显示全部追更剧集</small></button><button type="button" className={`metric-filter ${stateFilter === 'today' ? 'active' : ''}`} onClick={() => selectDashboardState('today')} aria-pressed={stateFilter === 'today'}><span>今日更新</span><strong>{todayTotal}</strong><small>筛选下次更新为今天的剧集</small></button><button type="button" className={`metric-filter ${stateFilter === 'exception' ? 'active' : ''}`} onClick={() => selectDashboardState('exception')} aria-pressed={stateFilter === 'exception'}><span>更新异常</span><strong>{exceptionTotal}</strong><small>筛选本服与官方集数异常的剧集</small></button></>}</div>
     <Toolbar query={query} onQuery={(value) => { setQuery(value); setPage(1); }} filter={stateFilter} onFilter={(value) => { setStateFilter(value); setPage(1); }} filterOptions={archived ? [['', '全部已归档']] : [['', '全部追更'], ['today', '今日更新'], ['exception', '更新异常']]} onRefresh={load} onSync={!archived ? syncTracking : undefined} syncing={syncing} syncLabel={trackingEnabled || moviepilotEnabled ? '同步追更' : '同步剧集'} searchPlaceholder={`搜索${sectionName}电视剧`} />
     <DataTable headers={['剧集', '节点 / 媒体库', '当前季', '本服 / 官方已播', '更新日期', '操作']} empty={series.length === 0} loading={loading}>
       {series.map((item) => <tr key={item.id} className={rowStateClass(item)}>
