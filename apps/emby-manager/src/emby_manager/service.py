@@ -347,14 +347,16 @@ def _tracking_snapshot(
         if _positive_int(last_episode.get("season_number")) == season_number
         else None
     )
+    next_air_date = _date_value(upcoming_episode.get("air_date"))
     next_update = (
-        _text(upcoming_episode.get("air_date"))
+        next_air_date.isoformat()
         if _positive_int(upcoming_episode.get("season_number")) == season_number
+        and next_air_date is not None and next_air_date >= date.today()
         else None
     )
     if isinstance(season_details, Mapping):
         aired: list[tuple[int, date]] = []
-        upcoming: list[date] = []
+        scheduled: list[date] = []
         for episode in season_details.get("episodes", []):
             if not isinstance(episode, Mapping):
                 continue
@@ -364,12 +366,14 @@ def _tracking_snapshot(
                 continue
             if air_date <= date.today():
                 aired.append((episode_number, air_date))
-            else:
-                upcoming.append(air_date)
+            if air_date >= date.today():
+                scheduled.append(air_date)
         if aired:
             official_latest = len(aired)
-        if upcoming:
-            next_update = min(upcoming).isoformat()
+        # A same-day episode is both already aired for progress purposes and the
+        # nearest scheduled update for the list.  If none remains, clear any
+        # stale series-level next_episode_to_air value.
+        next_update = min(scheduled).isoformat() if scheduled else None
     return {
         "season_name": season_name or None,
         "season_number": season_number,
