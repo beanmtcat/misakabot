@@ -62,7 +62,12 @@ def _network_sync_signature(
 
 
 class SessionRegistry:
-    """Server-side session registry: logout and service restart revoke signed cookies."""
+    """In-process revocation for signed browser sessions.
+
+    Starlette already validates the cookie signature and its 24-hour age.  The
+    registry adds immediate revocation while this process is running, but a
+    deployment must not force every administrator to authenticate again.
+    """
 
     def __init__(self, max_age_seconds: int) -> None:
         self._max_age_seconds = max_age_seconds
@@ -80,7 +85,13 @@ class SessionRegistry:
         async with self._lock:
             self._purge()
             value = self._sessions.get(session_id)
-            return value is not None and value[0] == username
+            if value is None:
+                # A signed, unexpired cookie can only have been created by this
+                # service. Re-register it after a process restart; the caller
+                # still verifies the account's current management permission.
+                self._sessions[session_id] = (username, time.monotonic() + self._max_age_seconds)
+                return True
+            return value[0] == username
 
     async def revoke(self, session_id: str) -> None:
         async with self._lock:
@@ -203,6 +214,7 @@ def create_app(
         return username
     sync_status: dict[str, dict[str, object | None]] = {
         "users": {"last_success_at": None, "last_result": None},
+        "movies": {"last_success_at": None, "last_result": None},
         "series": {"last_success_at": None, "last_result": None},
         "login_logs": {"last_success_at": None, "last_result": None},
         "watch_logs": {"last_success_at": None, "last_result": None},
@@ -231,6 +243,15 @@ def create_app(
         async with sync_lock:
             result = await manager.sync_watch_logs()
             sync_status["watch_logs"] = {
+                "last_success_at": datetime.now(timezone.utc).isoformat(),
+                "last_result": result,
+            }
+            return result
+
+    async def run_movie_sync() -> dict[str, int]:
+        async with sync_lock:
+            result = await manager.sync_movies()
+            sync_status["movies"] = {
                 "last_success_at": datetime.now(timezone.utc).isoformat(),
                 "last_result": result,
             }
@@ -322,6 +343,15 @@ def create_app(
             asyncio.create_task(
                 _periodic_sync(
                     "users", settings.user_sync_interval_seconds, run_user_sync, stop_event
+                )
+            ),
+            asyncio.create_task(
+                _periodic_sync(
+                    "movies",
+                    settings.movie_sync_interval_seconds,
+                    run_movie_sync,
+                    stop_event,
+                    run_immediately=False,
                 )
             ),
             asyncio.create_task(
@@ -492,6 +522,10 @@ def create_app(
         query: str | None = Query(None, max_length=100), _: str = Depends(require_management_admin),
     ) -> dict[str, object]:
         return manager.list_movies(page, size, query)
+
+    @app.post(f"{APP_PREFIX}/v1/emby/movies/sync")
+    async def sync_movies(_: str = Depends(require_write_authorization)) -> dict[str, int]:
+        return await _remote_operation(run_movie_sync())
 
     @app.get(f"{APP_PREFIX}/v1/emby/items/{{item_id}}/open", include_in_schema=False)
     def open_emby_item(

@@ -283,6 +283,117 @@ class LegacyEmbyRepository:
         )
         return {"items": rows, "total": int(total["count"]) if total else 0, "page": page, "page_size": size}
 
+    def library_subfolder_ids(self) -> set[int]:
+        rows = self._all("SELECT seq FROM dragonli_library_subfolders")
+        return {int(row["seq"]) for row in rows if _positive_int(row.get("seq")) is not None}
+
+    def upsert_emby_movies(self, payloads: list[Mapping[str, object]]) -> dict[str, int]:
+        """Upsert Emby movies and their sources using the existing legacy tables.
+
+        ``date_created`` deliberately means local import/update time here because
+        that is how the original ``syncMovie`` cron task exposed newly changed files.
+        """
+        movies: list[tuple[int, tuple[object, ...], list[tuple[object, ...]]]] = []
+        skipped = source_skipped = 0
+        for payload in payloads:
+            movie_id = _positive_int(payload.get("Id"))
+            name = _string(payload.get("Name"))[:200]
+            if movie_id is None or not name:
+                skipped += 1
+                continue
+            providers = payload.get("ProviderIds")
+            provider_ids = providers if isinstance(providers, Mapping) else {}
+            tmdb_id = next(
+                (_string(provider_ids.get(key)) for key in ("Tmdb", "TMDB", "tmdb") if _string(provider_ids.get(key))),
+                None,
+            )
+            images = payload.get("ImageTags")
+            image_tags = images if isinstance(images, Mapping) else {}
+            movie_values = (
+                name,
+                _nullable(payload.get("ServerId")),
+                _nullable(payload.get("Container")),
+                _non_negative_int(payload.get("RunTimeTicks")),
+                _non_negative_int(payload.get("Size")),
+                _non_negative_int(payload.get("Bitrate")),
+                _bool(payload.get("IsFolder")) if isinstance(payload.get("IsFolder"), bool) else False,
+                _nullable(payload.get("MediaType")),
+                _nullable(image_tags.get("Primary")),
+                _nullable(image_tags.get("Logo")),
+                _nullable(image_tags.get("Thumb")),
+                tmdb_id,
+                _positive_int(payload.get("ParentId")),
+            )
+            source_values: list[tuple[object, ...]] = []
+            media_sources = payload.get("MediaSources")
+            if isinstance(media_sources, list):
+                for source in media_sources:
+                    if not isinstance(source, Mapping):
+                        source_skipped += 1
+                        continue
+                    source_id = _string(source.get("Id"))
+                    if not source_id:
+                        source_skipped += 1
+                        continue
+                    source_values.append((
+                        source_id, str(movie_id), _nullable(source.get("Path")), _nullable(source.get("Container")),
+                        _non_negative_int(source.get("Size")), _nullable(source.get("Name")),
+                        _bool(source.get("IsRemote")), _bool(source.get("SupportsTranscoding")),
+                        _bool(source.get("SupportsDirectStream")), _bool(source.get("SupportsDirectPlay")),
+                    ))
+            movies.append((movie_id, movie_values, source_values))
+        if not movies:
+            return {"created": 0, "updated": 0, "skipped": skipped, "sources": 0, "source_skipped": source_skipped}
+
+        movie_ids = [movie_id for movie_id, _, _ in movies]
+        with closing(psycopg.connect(self._database_url, row_factory=dict_row)) as connection:
+            with connection.transaction():
+                current_rows = connection.execute(
+                    "SELECT id FROM dragonli_emby_movies WHERE id = ANY(%s)", (movie_ids,)
+                ).fetchall()
+                existing_ids = {int(row["id"]) for row in current_rows}
+                with connection.cursor() as cursor:
+                    cursor.executemany(
+                        '''INSERT INTO dragonli_emby_movies
+                        (id,name,server_id,container,runtime_ticks,size,bitrate,is_folder,media_type,
+                         image_primary,image_logo,image_thumb,tmdb_id,parent_id,ctime,mtime,isvalid,date_created)
+                        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,NOW(),NOW(),1,NOW())
+                        ON CONFLICT (id) DO UPDATE SET
+                          name=EXCLUDED.name,server_id=EXCLUDED.server_id,container=EXCLUDED.container,
+                          runtime_ticks=EXCLUDED.runtime_ticks,size=EXCLUDED.size,bitrate=EXCLUDED.bitrate,
+                          is_folder=EXCLUDED.is_folder,media_type=EXCLUDED.media_type,
+                          image_primary=EXCLUDED.image_primary,image_logo=EXCLUDED.image_logo,
+                          image_thumb=EXCLUDED.image_thumb,tmdb_id=EXCLUDED.tmdb_id,parent_id=EXCLUDED.parent_id,
+                          date_created=CASE WHEN dragonli_emby_movies.size IS DISTINCT FROM EXCLUDED.size
+                            THEN NOW() ELSE dragonli_emby_movies.date_created END,
+                          mtime=NOW(),isvalid=1''',
+                        [(movie_id, *values) for movie_id, values, _ in movies],
+                    )
+                    sources = [source for _, _, entries in movies for source in entries]
+                    if sources:
+                        cursor.executemany(
+                            '''INSERT INTO dragonli_emby_movie_sources
+                            (id,movie_id,path,container,size,name,is_remote,supports_transcoding,
+                             supports_direct_stream,supports_direct_play,ctime,mtime,isvalid)
+                            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,NOW(),NOW(),1)
+                            ON CONFLICT (id) DO UPDATE SET
+                              movie_id=EXCLUDED.movie_id,path=EXCLUDED.path,container=EXCLUDED.container,
+                              size=EXCLUDED.size,name=EXCLUDED.name,is_remote=EXCLUDED.is_remote,
+                              supports_transcoding=EXCLUDED.supports_transcoding,
+                              supports_direct_stream=EXCLUDED.supports_direct_stream,
+                              supports_direct_play=EXCLUDED.supports_direct_play,mtime=NOW(),isvalid=1''',
+                            sources,
+                        )
+        created = sum(movie_id not in existing_ids for movie_id, _, _ in movies)
+        source_count = sum(len(entries) for _, _, entries in movies)
+        return {
+            "created": created,
+            "updated": len(movies) - created,
+            "skipped": skipped,
+            "sources": source_count,
+            "source_skipped": source_skipped,
+        }
+
     def tracked_series_path_targets(self) -> dict[str, str]:
         rows = self._all(
             '''SELECT s.themoviedb,l.name AS library_name
@@ -676,6 +787,53 @@ class LegacyEmbyRepository:
             ),
         )
 
+    def upsert_tmdb_episodes(self, series_id: int, payload: Mapping[str, object]) -> dict[str, int]:
+        """Persist TMDB's selected season exactly as the legacy Themoviedb cron did."""
+        episodes = payload.get("episodes")
+        if not isinstance(episodes, list):
+            return {"synced": 0, "skipped": 0}
+        rows: list[tuple[object, ...]] = []
+        skipped = 0
+        for episode in episodes:
+            if not isinstance(episode, Mapping):
+                skipped += 1
+                continue
+            episode_id = _positive_int(episode.get("id"))
+            show_id = _positive_int(episode.get("show_id"))
+            season_number = _positive_int(episode.get("season_number"))
+            episode_number = _positive_int(episode.get("episode_number"))
+            name = _string(episode.get("name"))
+            if None in (episode_id, show_id, season_number, episode_number) or not name:
+                skipped += 1
+                continue
+            rows.append((
+                episode_id, series_id, show_id, season_number, episode_number, name,
+                _nullable(episode.get("overview")), _nullable(episode.get("air_date")),
+                _nullable(episode.get("episode_type")), _nullable(episode.get("production_code")),
+                _non_negative_int(episode.get("runtime")), _nullable(episode.get("still_path")),
+                _decimal(episode.get("vote_average")), _non_negative_int(episode.get("vote_count")),
+            ))
+        if not rows:
+            return {"synced": 0, "skipped": skipped}
+        with closing(psycopg.connect(self._database_url, row_factory=dict_row)) as connection:
+            with connection.transaction():
+                with connection.cursor() as cursor:
+                    cursor.executemany(
+                        '''INSERT INTO dragonli_tmdb_episodes
+                        (id,tid,show_id,season_number,episode_number,name,overview,air_date,episode_type,
+                         production_code,runtime,still_path,vote_average,vote_count,ctime,mtime,isvalid)
+                        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,NOW(),NOW(),1)
+                        ON CONFLICT (id) DO UPDATE SET
+                          tid=EXCLUDED.tid,show_id=EXCLUDED.show_id,season_number=EXCLUDED.season_number,
+                          episode_number=EXCLUDED.episode_number,name=EXCLUDED.name,overview=EXCLUDED.overview,
+                          air_date=EXCLUDED.air_date,episode_type=EXCLUDED.episode_type,
+                          production_code=EXCLUDED.production_code,runtime=EXCLUDED.runtime,
+                          still_path=EXCLUDED.still_path,vote_average=EXCLUDED.vote_average,
+                          vote_count=EXCLUDED.vote_count,mtime=NOW(),isvalid=1''',
+                        rows,
+                    )
+        return {"synced": len(rows), "skipped": skipped}
+
     def import_moviepilot_series(self, subscriptions: Mapping[str, str]) -> dict[str, int]:
         """Enable existing series and add missing MoviePilot subscriptions without DDL.
 
@@ -797,6 +955,14 @@ def _positive_int(value: object) -> int | None:
 def _non_negative_int(value: object) -> int | None:
     try:
         parsed = int(str(value))
+    except (TypeError, ValueError):
+        return None
+    return parsed if parsed >= 0 else None
+
+
+def _decimal(value: object) -> float | None:
+    try:
+        parsed = float(str(value))
     except (TypeError, ValueError):
         return None
     return parsed if parsed >= 0 else None

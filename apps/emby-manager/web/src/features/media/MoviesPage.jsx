@@ -22,6 +22,8 @@ export default function MoviesPage({ notify }) {
   const [total, setTotal] = useState(0);
   const [loading, setLoading] = useState(false);
   const [movieLogs, setMovieLogs] = useState(null);
+  const [syncing, setSyncing] = useState(false);
+  const [syncMessage, setSyncMessage] = useState('');
 
   async function load() {
     setLoading(true);
@@ -56,14 +58,32 @@ export default function MoviesPage({ notify }) {
     loadMovieLogs(movie);
   }
 
+  async function syncMovies() {
+    if (syncing) return;
+    setSyncing(true);
+    setSyncMessage('正在从 Emby 同步电影及媒体源…');
+    try {
+      const result = await api('/v1/emby/movies/sync', { method: 'POST' });
+      const message = `同步完成：新建 ${result.created || 0}，更新 ${result.updated || 0}，媒体源 ${result.sources || 0}`;
+      setSyncMessage(message);
+      notify(message);
+      await load();
+    } catch (reason) {
+      setSyncMessage(`同步失败：${reason.message}`);
+      notify(reason.message, true);
+    } finally {
+      setSyncing(false);
+    }
+  }
+
   const watched = movies.filter((movie) => Number(movie.view_count) > 0).length;
   return <section className="page-section media-section">
     <div className="metric-grid"><article><span>电影总数</span><strong>{total}</strong><small>当前有效媒体索引</small></article><article><span>本页已播放</span><strong>{watched}</strong><small>有观看记录的电影</small></article><article><span>本页未播放</span><strong>{movies.length - watched}</strong><small>等待第一次观看</small></article></div>
-    <Toolbar query={query} onQuery={(value) => { setQuery(value); setPage(1); }} onRefresh={load} searchPlaceholder="搜索电影名称" />
+    <Toolbar query={query} onQuery={(value) => { setQuery(value); setPage(1); }} onRefresh={load} onSync={syncMovies} syncing={syncing} syncLabel="同步电影" searchPlaceholder="搜索电影名称" />
     <DataTable headers={['电影', '时长', '文件', '观看次数', '最近观看', '入库时间', '操作']} empty={movies.length === 0} loading={loading}>
       {movies.map((movie) => <tr key={movie.id}><td>{movie.server_id ? <a className="emby-item-link" href={embyItemUrl(movie.id, movie.server_id)} target="_blank" rel="noreferrer">{movie.name || '未命名电影'}</a> : <strong>{movie.name || '未命名电影'}</strong>}<small>{movie.media_type || 'Movie'}</small></td><td>{formatTicks(movie.runtime_ticks)}</td><td><span className="size-value">{movie.container || '—'}</span><small>{formatBytes(movie.size)}</small></td><td><span className={`pill ${Number(movie.view_count) ? 'success' : ''}`}>{movie.view_count || 0} 次</span></td><td>{formatTime(movie.last_played)}</td><td>{formatTime(movie.date_created)}</td><td className="action-cell"><button className="secondary compact" onClick={() => openMovieLogs(movie)}>观看记录</button></td></tr>)}
     </DataTable>
-    <TableFooter total={total} page={page} pageSize={PAGE_SIZE} statusText="媒体索引保持原有库表结构" onPageChange={setPage} />
+    <TableFooter total={total} page={page} pageSize={PAGE_SIZE} statusText={syncMessage || '媒体索引保持原有库表结构'} onPageChange={setPage} />
     {movieLogs && <Dialog title={`观看记录 · ${movieLogs.movie.name || '未命名电影'}`} onClose={() => setMovieLogs(null)}>
       {movieLogs.loading ? <p className="modal-loading">正在读取观看记录…</p> : <div className="movie-history-wrap"><table className="movie-history-table"><thead><tr><th>用户</th><th>开始时间</th><th>进度</th><th>设备</th><th>IP 地址</th><th>状态</th></tr></thead><tbody>{movieLogs.items.length ? movieLogs.items.map((item) => { const progress = Math.min(100, Math.max(0, Math.round(Number(item.play_progress || 0) * 100))); return <tr key={item.id}><td>{item.username}</td><td>{formatTime(item.play_start_time)}</td><td>{progress}%<small>{formatDuration(item.play_position)} / {formatDuration(item.total_duration)}</small></td><td>{item.device_name || '未知设备'}<small>{item.client_name || 'Emby Client'}</small></td><td>{item.ip_address || '—'}</td><td><span className={`pill ${item.play_end_time ? item.is_completed ? 'success' : 'danger' : 'watching'}`}>{item.play_end_time ? item.is_completed ? '已完成' : '已结束' : '观看中'}</span></td></tr>; }) : <tr><td colSpan="6">暂无已同步的观看记录。</td></tr>}</tbody></table><TableFooter total={movieLogs.total} page={movieLogs.page} pageSize={PAGE_SIZE} onPageChange={(nextPage) => loadMovieLogs(movieLogs.movie, nextPage)} /></div>}
     </Dialog>}

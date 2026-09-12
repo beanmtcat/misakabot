@@ -36,6 +36,32 @@ class EmbyClient:
             "Series", "ProviderIds,DateCreated,ParentId,ServerId,IsFolder,Type,ProductionYear"
         )
 
+    async def list_movies(self) -> list[Mapping[str, object]]:
+        """Return every movie with the legacy movie-index fields and media sources."""
+        return await self._list_items(
+            "Movie",
+            "MediaSources,ParentId,DateCreated,ProviderIds,ServerId,IsFolder,Type,"
+            "Container,RunTimeTicks,Size,Bitrate,MediaType,ImageTags",
+        )
+
+    async def movie_library_parent_id(self, movie_id: int) -> int | None:
+        """Resolve a movie's library child when its direct parent is a folder.
+
+        Dragonli's legacy PHP task performs the same Ancestors lookup before saving
+        a movie, so joins to ``dragonli_library_subfolders`` continue to work.
+        """
+        payload = await self._request("GET", f"/Items/{movie_id}/Ancestors")
+        if not isinstance(payload, list):
+            raise RuntimeError("Emby movie ancestors returned an unexpected response")
+        for ancestor in payload:
+            if not isinstance(ancestor, Mapping):
+                continue
+            if _integer(ancestor.get("ParentId")) == 1:
+                resolved = _integer(ancestor.get("Id"))
+                if resolved is not None and resolved > 0:
+                    return resolved
+        return None
+
     async def list_episodes_for_series(self, series_ids: list[int]) -> list[Mapping[str, object]]:
         """Fetch episodes only for tracked Emby series, with bounded parallelism."""
         semaphore = asyncio.Semaphore(8)
@@ -250,3 +276,11 @@ def _optional(value: object, length: int) -> str | None:
 
 def _number(value: object) -> float:
     return float(value) if isinstance(value, (int, float)) else 0.0
+
+
+def _integer(value: object) -> int | None:
+    try:
+        parsed = int(str(value))
+    except (TypeError, ValueError):
+        return None
+    return parsed

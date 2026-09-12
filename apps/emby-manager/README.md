@@ -31,20 +31,20 @@ docker compose up -d --build
 
 生产环境必须设置 `SESSION_HTTPS_ONLY=true` 与 `EMBY_MANAGER_ORIGIN=https://你的管理域名`。
 登录按“来源 IP + 用户名”在内存中限流，默认 15 分钟内最多 5 次失败；失败、限流、CSRF 拒绝
-和会话撤销会写入服务的结构化安全日志。会话同时保存在服务端内存登记表中：退出登录、服务
-重启、账号从管理员白名单移除或 `islogin` 被关闭后，已有 Cookie 立即失效。所有写接口要求
+和会话撤销会写入服务的结构化安全日志。退出登录、账号从管理员白名单移除或 `islogin` 被关闭后，
+已有 Cookie 会失效；服务重启时，仍在 24 小时有效期内的签名 Cookie 会保留登录状态。所有写接口要求
 同源 `Origin` 和每会话 CSRF Token。
 
 Docker 镜像会自动使用 `/app/web/dist`。仅在非 Docker 部署且前端构建文件不在项目默认
 `web/dist` 目录时，才需要设置 `EMBY_WEB_ROOT`。
 
-用户、登录会话与播放活动会在服务启动后立即同步；电视剧索引会等待周期后执行，默认每 30 分钟同步用户和电视剧、
+用户、登录会话与播放活动会在服务启动后立即同步；电影与电视剧索引会等待周期后执行，默认每 30 分钟同步用户、电影和电视剧、
 每 1 分钟同步登录会话和播放活动。可通过
-`EMBY_USER_SYNC_INTERVAL_SECONDS`、`EMBY_SERIES_SYNC_INTERVAL_SECONDS`、
+`EMBY_USER_SYNC_INTERVAL_SECONDS`、`EMBY_MOVIE_SYNC_INTERVAL_SECONDS`、`EMBY_SERIES_SYNC_INTERVAL_SECONDS`、
 `EMBY_LOGIN_SYNC_INTERVAL_SECONDS` 和 `EMBY_WATCH_SYNC_INTERVAL_SECONDS` 调整周期。
 
 设置 `TMDB_API_TOKEN` 后，服务会每 6 小时同步已开启追更且已设置 TMDB ID 的电视剧，更新官方已播集数、
-下次播出日期及本服集数。服务启动时不会额外执行 TMDB 同步；可通过 `EMBY_TRACKING_SYNC_INTERVAL_SECONDS`
+下次播出日期、本服集数，并写入当前季的 TMDB 单集资料。服务启动时不会额外执行 TMDB 同步；可通过 `EMBY_TRACKING_SYNC_INTERVAL_SECONDS`
 调整周期。
 
 同时设置 `MOVIEPILOT_BASE_URL` 与 `MOVIEPILOT_API_TOKEN` 后，服务会立即读取 MoviePilot 的电视剧订阅，
@@ -60,6 +60,7 @@ Docker 镜像会自动使用 `/app/web/dist`。仅在非 Docker 部署且前端�
 - `PATCH /emby-manager/v1/emby/users/{user_id}/policy`：禁用/启用用户或切换远程访问；
 - `GET /emby-manager/v1/emby/dashboard`：媒体库与活动概览；
 - `GET /emby-manager/v1/emby/movies`：查询已有电影索引及观看次数；
+- `POST /emby-manager/v1/emby/movies/sync`：从 Emby 同步电影与媒体源；
 - `GET /emby-manager/v1/emby/series`：查询已有电视剧、季和单集索引；
 - `POST /emby-manager/v1/emby/series/sync`：从 Emby 同步电视剧，并按 TMDB ID 合并追更状态；
 - `PATCH /emby-manager/v1/emby/series/{series_id}/tracking`：开启或停止已有电视剧的追更；

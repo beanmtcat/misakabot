@@ -41,6 +41,7 @@ class Settings:
     session_https_only: bool = False
     web_root: Path | None = None
     user_sync_interval_seconds: int = 1800
+    movie_sync_interval_seconds: int = 1800
     series_sync_interval_seconds: int = 1800
     login_sync_interval_seconds: int = 60
     watch_sync_interval_seconds: int = 60
@@ -90,6 +91,7 @@ class Settings:
                 else None
             ),
             user_sync_interval_seconds=_positive_seconds("EMBY_USER_SYNC_INTERVAL_SECONDS", 1800),
+            movie_sync_interval_seconds=_positive_seconds("EMBY_MOVIE_SYNC_INTERVAL_SECONDS", 1800),
             series_sync_interval_seconds=_positive_seconds("EMBY_SERIES_SYNC_INTERVAL_SECONDS", 1800),
             login_sync_interval_seconds=_positive_seconds("EMBY_LOGIN_SYNC_INTERVAL_SECONDS", 60),
             watch_sync_interval_seconds=_positive_seconds("EMBY_WATCH_SYNC_INTERVAL_SECONDS", 60),

@@ -147,7 +147,7 @@ class EmbyManagementService:
     async def _sync_tracking_rows(self, rows: list[Mapping[str, object]]) -> dict[str, int]:
         if self._tmdb_client is None:
             raise RuntimeError("TMDB_API_TOKEN is not configured")
-        updated = skipped = failed = 0
+        updated = skipped = failed = episode_synced = episode_skipped = 0
         for row in rows:
             series_id = _positive_int(row.get("id"))
             tmdb_id = _positive_int(row.get("themoviedb"))
@@ -160,24 +160,51 @@ class EmbyManagementService:
                 if snapshot is None:
                     skipped += 1
                     continue
-                if snapshot["official_latest"] is None or snapshot["next_update"] is None:
-                    season_number = _positive_int(snapshot["season_number"])
-                    if season_number is not None:
-                        try:
-                            season_details = await self._tmdb_client.get_tv_season_details(tmdb_id, season_number)
-                            snapshot = _tracking_snapshot(row, details, season_details) or snapshot
-                        except (httpx.HTTPError, RuntimeError, ValueError):
-                            logger.warning(
-                                "series_tracking_season_lookup_failed series_id=%s tmdb_id=%s season=%s",
-                                series_id, tmdb_id, season_number,
-                                exc_info=True,
-                            )
+                season_number = _positive_int(snapshot["season_number"])
+                if season_number is not None:
+                    try:
+                        season_details = await self._tmdb_client.get_tv_season_details(tmdb_id, season_number)
+                        snapshot = _tracking_snapshot(row, details, season_details) or snapshot
+                        episode_result = self._repository.upsert_tmdb_episodes(series_id, season_details)
+                        episode_synced += episode_result["synced"]
+                        episode_skipped += episode_result["skipped"]
+                    except (httpx.HTTPError, RuntimeError, ValueError):
+                        logger.warning(
+                            "series_tracking_season_lookup_failed series_id=%s tmdb_id=%s season=%s",
+                            series_id, tmdb_id, season_number,
+                            exc_info=True,
+                        )
                 self._repository.save_tracking_metadata(series_id, **snapshot)
                 updated += 1
             except (httpx.HTTPError, RuntimeError, ValueError):
                 logger.exception("series_tracking_sync_failed series_id=%s tmdb_id=%s", series_id, tmdb_id)
                 failed += 1
-        return {"updated": updated, "skipped": skipped, "failed": failed}
+        return {
+            "updated": updated,
+            "skipped": skipped,
+            "failed": failed,
+            "episodes": episode_synced,
+            "episode_skipped": episode_skipped,
+        }
+
+    async def sync_movies(self) -> dict[str, int]:
+        """Import the legacy movie index and media-source tables from Emby."""
+        known_library_parents = self._repository.library_subfolder_ids()
+        resolved_parents: dict[int, int | None] = {}
+        movies: list[Mapping[str, object]] = []
+        for payload in await self._client.list_movies():
+            movie_id = _positive_int(payload.get("Id"))
+            parent_id = _positive_int(payload.get("ParentId"))
+            if movie_id is not None and parent_id is not None and parent_id not in known_library_parents:
+                if parent_id not in resolved_parents:
+                    resolved_parents[parent_id] = await self._client.movie_library_parent_id(movie_id)
+                if (resolved_parent := resolved_parents[parent_id]) is not None:
+                    updated_payload = dict(payload)
+                    updated_payload["ParentId"] = resolved_parent
+                    movies.append(updated_payload)
+                    continue
+            movies.append(payload)
+        return self._repository.upsert_emby_movies(movies)
 
     async def sync_moviepilot_subscriptions(self) -> dict[str, int]:
         if self._moviepilot_client is None:
