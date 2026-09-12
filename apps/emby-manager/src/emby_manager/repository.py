@@ -493,7 +493,8 @@ class LegacyEmbyRepository:
             LEFT JOIN dragonli_library_subfolders l ON l.seq=s.parent_id
             LEFT JOIN dragonli_storage_nodes n ON n.seq=l.node_id
             LEFT JOIN LATERAL (
-              SELECT COUNT(*) AS episode_count,MAX(index_number) AS latest_index,MAX(date_created) AS latest_episode
+              SELECT COUNT(DISTINCT index_number) AS episode_count,
+                MAX(index_number) AS latest_index,MAX(date_created) AS latest_episode
               FROM dragonli_emby_episodes episode
               WHERE episode.isvalid=1 AND episode.series_id=s.id
                 AND (COALESCE(s.lock_season,s.season_number) IS NULL

@@ -9,8 +9,7 @@ const blankDetail = { tracking: true, library_name: '', themoviedb: '', quark: '
 
 function updateState(item) {
   const localCount = Number(item.episode_count || 0);
-  const localLatest = Number(item.local_latest || 0);
-  if (localCount || item.official_latest) return `本服 ${localCount} 集${localLatest ? `（至第 ${localLatest} 集）` : ''} / 已播 ${item.official_latest || '—'}`;
+  if (localCount || item.official_latest) return `本服 ${localCount} / 已播 ${item.official_latest || '—'}`;
   return item.update_time ? formatTime(item.update_time) : '暂无更新信息';
 }
 
