@@ -44,6 +44,9 @@ class EmbyManagementService:
     def is_login_enabled(self, username: str) -> bool:
         return self._repository.is_login_enabled(username)
 
+    def sync_network_stats(self, interface_name: str, stats: list[tuple[date, int, int, float]]) -> int:
+        return self._repository.upsert_network_stats(interface_name, stats)
+
     def list_users(self, page: int, size: int, query: str | None, disabled: bool | None) -> dict[str, object]:
         return self._repository.list_users(page, size, query, disabled)
 

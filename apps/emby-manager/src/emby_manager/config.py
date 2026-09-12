@@ -109,12 +109,7 @@ class Settings:
             moviepilot_sync_interval_seconds=_positive_seconds(
                 "MOVIEPILOT_SYNC_INTERVAL_SECONDS", 1800
             ),
-            # EMBY_PATH_MAP_API_TOKEN is accepted during the HMAC migration so
-            # existing deployments do not stop serving path mappings.
-            path_map_api_secret=(
-                os.environ.get("EMBY_PATH_MAP_API_SECRET", "").strip()
-                or os.environ.get("EMBY_PATH_MAP_API_TOKEN", "").strip()
-            ),
+            path_map_api_secret=os.environ.get("EMBY_PATH_MAP_API_SECRET", "").strip(),
             manager_admin_usernames=manager_admin_usernames,
             manager_origin=manager_origin,
             login_rate_limit_attempts=_positive_seconds("EMBY_LOGIN_RATE_LIMIT_ATTEMPTS", 5),

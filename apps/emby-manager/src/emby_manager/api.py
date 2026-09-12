@@ -3,12 +3,13 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import hmac
+import json
 import logging
 import re
 import secrets
 import time
 from contextlib import asynccontextmanager
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from pathlib import Path
 from urllib.parse import quote
 
@@ -17,7 +18,7 @@ from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.sessions import SessionMiddleware
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, ValidationError
 
 from .auth import LoginRateLimiter
 from .config import Settings
@@ -31,6 +32,7 @@ logger = logging.getLogger(__name__)
 APP_PREFIX = "/emby-manager"
 PATH_MAP_SIGNATURE_MAX_AGE_SECONDS = 300
 PATH_MAP_NONCE_PATTERN = re.compile(r"[A-Za-z0-9_-]{16,128}")
+NETWORK_SYNC_MAX_BODY_BYTES = 16 * 1024
 
 
 def _path_map_signature_payload(
@@ -47,6 +49,16 @@ def _path_map_signature(
         _path_map_signature_payload(method, raw_path, query, timestamp, nonce),
         hashlib.sha256,
     ).hexdigest()
+
+
+def _network_sync_signature(
+    secret: str, method: str, raw_path: str, query: str, timestamp: str, nonce: str, body: bytes
+) -> str:
+    body_digest = hashlib.sha256(body).hexdigest()
+    payload = "\n".join(
+        (method.upper(), raw_path, query, timestamp, nonce, body_digest)
+    ).encode("utf-8")
+    return hmac.new(secret.encode("utf-8"), payload, hashlib.sha256).hexdigest()
 
 
 class SessionRegistry:
@@ -98,6 +110,18 @@ class LoginRequest(BaseModel):
     password: str = Field(min_length=1, max_length=256)
 
 
+class NetworkStat(BaseModel):
+    date: date
+    rx: int = Field(ge=0)
+    tx: int = Field(ge=0)
+    avg_rate: float = Field(default=0, ge=0, le=10_000_000)
+
+
+class NetworkStatsSyncRequest(BaseModel):
+    interface: str = Field(min_length=1, max_length=50, pattern=r"^[A-Za-z0-9_.:-]+$")
+    data: list[NetworkStat] = Field(min_length=1, max_length=31)
+
+
 class TrackingChange(BaseModel):
     tracking: bool
 
@@ -136,6 +160,8 @@ def create_app(
     )
     path_map_nonce_lock = asyncio.Lock()
     path_map_seen_nonces: dict[str, int] = {}
+    network_sync_nonce_lock = asyncio.Lock()
+    network_sync_seen_nonces: dict[str, int] = {}
 
     def audit_address(request: Request) -> str:
         return request.headers.get("X-Real-IP", "").strip() or (
@@ -539,6 +565,75 @@ def create_app(
             if nonce in path_map_seen_nonces:
                 raise HTTPException(status_code=401, detail="路径映射 API 请求签名无效")
             path_map_seen_nonces[nonce] = now + PATH_MAP_SIGNATURE_MAX_AGE_SECONDS
+
+    async def require_network_sync_signature(request: Request) -> None:
+        signing_secret = settings.path_map_api_secret
+        if not signing_secret:
+            raise HTTPException(status_code=503, detail="未配置网络流量同步签名密钥")
+        content_length = request.headers.get("Content-Length")
+        if content_length:
+            try:
+                if int(content_length) > NETWORK_SYNC_MAX_BODY_BYTES:
+                    raise HTTPException(status_code=413, detail="网络流量同步请求过大")
+            except ValueError:
+                raise HTTPException(status_code=400, detail="网络流量同步请求长度无效") from None
+        timestamp = request.headers.get("X-Emby-Timestamp", "")
+        nonce = request.headers.get("X-Emby-Nonce", "")
+        supplied_signature = request.headers.get("X-Emby-Signature", "")
+        try:
+            timestamp_value = int(timestamp)
+        except ValueError:
+            raise HTTPException(status_code=401, detail="网络流量同步请求签名无效") from None
+        now = int(time.time())
+        if (
+            abs(now - timestamp_value) > PATH_MAP_SIGNATURE_MAX_AGE_SECONDS
+            or not PATH_MAP_NONCE_PATTERN.fullmatch(nonce)
+            or not re.fullmatch(r"[0-9a-f]{64}", supplied_signature)
+        ):
+            raise HTTPException(status_code=401, detail="网络流量同步请求签名无效")
+        raw_path = request.scope.get("raw_path", request.url.path.encode("utf-8")).decode(
+            "ascii", "surrogateescape"
+        )
+        body = await request.body()
+        if len(body) > NETWORK_SYNC_MAX_BODY_BYTES:
+            raise HTTPException(status_code=413, detail="网络流量同步请求过大")
+        expected_signature = _network_sync_signature(
+            signing_secret,
+            request.method,
+            raw_path,
+            request.url.query,
+            timestamp,
+            nonce,
+            body,
+        )
+        if not secrets.compare_digest(supplied_signature, expected_signature):
+            raise HTTPException(status_code=401, detail="网络流量同步请求签名无效")
+        async with network_sync_nonce_lock:
+            expired_nonces = [
+                known_nonce
+                for known_nonce, expires_at in network_sync_seen_nonces.items()
+                if expires_at <= now
+            ]
+            for known_nonce in expired_nonces:
+                del network_sync_seen_nonces[known_nonce]
+            if nonce in network_sync_seen_nonces:
+                raise HTTPException(status_code=401, detail="网络流量同步请求签名无效")
+            network_sync_seen_nonces[nonce] = now + PATH_MAP_SIGNATURE_MAX_AGE_SECONDS
+
+    @app.post(f"{APP_PREFIX}/v1/emby/network-stats/sync")
+    async def sync_network_stats(
+        request: Request,
+        _: None = Depends(require_network_sync_signature),
+    ) -> dict[str, object]:
+        try:
+            payload = NetworkStatsSyncRequest.model_validate_json(await request.body())
+        except ValidationError as error:
+            raise HTTPException(status_code=422, detail=json.loads(error.json())) from None
+        upserted = manager.sync_network_stats(
+            payload.interface,
+            [(item.date, item.rx, item.tx, item.avg_rate) for item in payload.data],
+        )
+        return {"interface": payload.interface, "upserted": upserted}
 
     @app.get(
         f"{APP_PREFIX}/v1/emby/nodes/{{node_id}}/series-paths",

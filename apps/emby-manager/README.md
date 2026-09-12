@@ -82,4 +82,22 @@ Cookie 或 Bearer Token。请求必须使用 `EMBY_PATH_MAP_API_SECRET` 计算 H
 服务端会拒绝过期、重复 nonce 或签名不匹配的请求。`auto_transfer.py` 已自动生成这些请求头；其
 `path_map_api` 配置应使用 `secret_env` 引用环境变量名，例如 `"secret_env": "EMBY_PATH_MAP_API_SECRET"`。
 
+## 主机流量同步
+
+根目录的 `sync_network.sh` 从运行它的主机读取 vnStat 最近 7 天日流量，并写入既有的
+`dragonli_network_stats` 表。它调用 `POST /emby-manager/v1/emby/network-stats/sync`，不使用
+管理后台 Cookie、Bearer Token 或旧式静态 API Key。
+
+服务端与运行脚本的主机必须分别配置相同的 `EMBY_PATH_MAP_API_SECRET`。脚本还支持
+`NETWORK_INTERFACE` 与 `EMBY_NETWORK_SYNC_URL` 覆盖默认网卡和接口地址：
+
+```bash
+export EMBY_PATH_MAP_API_SECRET='replace-with-a-random-secret'
+NETWORK_INTERFACE=<你的网卡名> ./sync_network.sh
+```
+
+每个请求携带 `X-Emby-Timestamp`、`X-Emby-Nonce` 和 `X-Emby-Signature`。签名内容为
+`POST + "\\n" + 原始路径 + "\\n" + 查询串 + "\\n" + timestamp + "\\n" + nonce + "\\n" + SHA256(原始请求体)`
+的 HMAC-SHA256 十六进制摘要。服务端仅接受前后 5 分钟内的请求，并拒绝 nonce 重放和请求体被替换的情况。
+
 `EMBY_BASE_URL` 仅用于服务端访问 Emby API。若 API 使用内网地址，请设置 `EMBY_WEB_BASE_URL` 为浏览器可访问的 Emby 公网地址，媒体名称跳转会使用该地址。

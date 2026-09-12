@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from contextlib import closing
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 
 import psycopg
 from pypinyin import Style, lazy_pinyin
@@ -64,6 +64,36 @@ class LegacyEmbyRepository:
         return self._one(
             "SELECT 1 FROM dragonli_users WHERE username=%s AND islogin=TRUE", (username,)
         ) is not None
+
+    def upsert_network_stats(
+        self, interface_name: str, stats: list[tuple[date, int, int, float]]
+    ) -> int:
+        """Persist vnStat daily counters using the existing interface/date unique index."""
+        with closing(psycopg.connect(self._database_url)) as connection:
+            for stat_date, rx_bytes, tx_bytes, avg_rate in stats:
+                total_bytes = rx_bytes + tx_bytes
+                connection.execute(
+                    """INSERT INTO dragonli_network_stats
+                    (interface_name,stat_date,rx_bytes,tx_bytes,total_bytes,avg_rate,rx_gb,tx_gb,total_gb,rtime)
+                    VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,NOW())
+                    ON CONFLICT (interface_name,stat_date) DO UPDATE SET
+                      rx_bytes=EXCLUDED.rx_bytes,tx_bytes=EXCLUDED.tx_bytes,
+                      total_bytes=EXCLUDED.total_bytes,avg_rate=EXCLUDED.avg_rate,
+                      rx_gb=EXCLUDED.rx_gb,tx_gb=EXCLUDED.tx_gb,total_gb=EXCLUDED.total_gb,rtime=NOW()""",
+                    (
+                        interface_name,
+                        stat_date,
+                        rx_bytes,
+                        tx_bytes,
+                        total_bytes,
+                        avg_rate,
+                        round(rx_bytes / 1024**3, 2),
+                        round(tx_bytes / 1024**3, 2),
+                        round(total_bytes / 1024**3, 2),
+                    ),
+                )
+            connection.commit()
+        return len(stats)
 
     def save_watch_session(self, session: WatchSession) -> bool:
         existing = self._one(
