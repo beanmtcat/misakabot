@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import os
 from dataclasses import dataclass
-from pathlib import Path
 
 
 def _csv_ints(value: str) -> frozenset[int]:
@@ -13,7 +12,6 @@ def _csv_ints(value: str) -> frozenset[int]:
 class Settings:
     telegram_bot_token: str
     admin_user_ids: frozenset[int]
-    audit_database_path: Path
     database_url: str = ""
     allowed_group_ids: frozenset[int] = frozenset()
     dmit_knowledge_group_ids: frozenset[int] = frozenset()
@@ -62,7 +60,6 @@ class Settings:
         return cls(
             telegram_bot_token=token,
             admin_user_ids=_csv_ints(os.environ.get("ADMIN_USER_IDS", "")),
-            audit_database_path=Path(os.environ.get("AUDIT_DATABASE_PATH", "./data/misakabot.sqlite3")),
             database_url=os.environ.get("DATABASE_URL", "").strip(),
             allowed_group_ids=_csv_ints(os.environ.get("ALLOWED_GROUP_IDS", "")),
             dmit_knowledge_group_ids=_csv_ints(os.environ.get("DMIT_KNOWLEDGE_GROUP_IDS", "")),

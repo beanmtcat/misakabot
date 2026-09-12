@@ -15,7 +15,6 @@ x-app-environment: &app-environment
   TURNSTILE_SECRET_KEY: ${TURNSTILE_SECRET_KEY:?Set TURNSTILE_SECRET_KEY in .env}
   ADMIN_USER_IDS: ${ADMIN_USER_IDS:?Set ADMIN_USER_IDS in .env}
   ALLOWED_GROUP_IDS: ${ALLOWED_GROUP_IDS:?Set ALLOWED_GROUP_IDS in .env}
-  AUDIT_DATABASE_PATH: /app/data/misakabot.sqlite3
   LLM_MODE: kimi_coding
   LLM_API_BASE_URL: ${LLM_API_BASE_URL:-}
   LLM_API_KEY: ${LLM_API_KEY:?Set LLM_API_KEY in .env}
@@ -55,16 +54,6 @@ x-emby-service-environment: &emby-service-environment
   EMBY_PATH_MAP_API_TOKEN: ${EMBY_PATH_MAP_API_TOKEN:?Set EMBY_PATH_MAP_API_TOKEN in .env}
 
 services:
-  data-init:
-    build:
-      context: ./apps/bot
-      network: host
-    user: "0:0"
-    command: ["sh", "-c", "mkdir -p /app/data && chown -R 10001:10001 /app/data"]
-    restart: "no"
-    volumes:
-      - /data/misakabot:/app/data
-
   misaka-bot:
     build:
       context: ./apps/bot
@@ -73,11 +62,6 @@ services:
     user: "10001:10001"
     environment: *app-environment
     restart: unless-stopped
-    depends_on:
-      data-init:
-        condition: service_completed_successfully
-    volumes:
-      - /data/misakabot:/app/data
     ports:
       - "127.0.0.1:8081:8081"
 
@@ -95,11 +79,6 @@ services:
       - "127.0.0.1:8082:8080"
     restart: unless-stopped
     profiles: ["audit"]
-    depends_on:
-      data-init:
-        condition: service_completed_successfully
-    volumes:
-      - /data/misakabot:/app/data
 
   audit-ui:
     build:

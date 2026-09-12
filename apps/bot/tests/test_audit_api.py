@@ -5,7 +5,6 @@ import tempfile
 import time
 import unittest
 from datetime import datetime, timezone
-from pathlib import Path
 from urllib.parse import urlencode
 
 from fastapi.testclient import TestClient
@@ -36,7 +35,6 @@ class AuditApiTests(unittest.TestCase):
             telegram_bot_token="123:token",
             admin_user_ids=frozenset({1}),
             allowed_group_ids=frozenset({-1}),
-            audit_database_path=database_path,
         )
 
     def test_admin_can_read_events_and_others_cannot(self) -> None:
@@ -77,7 +75,6 @@ class AuditApiTests(unittest.TestCase):
                 telegram_bot_token="123:token",
                 admin_user_ids=frozenset({1}),
                 allowed_group_ids=frozenset({-1}),
-                audit_database_path=Path(repository.database_path),
             )
             async def is_group_admin(user_id: int, chat_id: int) -> bool:
                 return user_id == 2 and chat_id == -1
@@ -115,7 +112,6 @@ class AuditApiTests(unittest.TestCase):
                 telegram_bot_token="123:token",
                 admin_user_ids=frozenset({1}),
                 allowed_group_ids=frozenset({-1}),
-                audit_database_path=Path(repository.database_path),
             )
             client = TestClient(create_app(settings, repository))
             headers = {"X-Telegram-Init-Data": signed_init_data("123:token", 1)}
@@ -145,7 +141,6 @@ class AuditApiTests(unittest.TestCase):
                 telegram_bot_token="123:token",
                 admin_user_ids=frozenset({1}),
                 allowed_group_ids=frozenset({-1}),
-                audit_database_path=Path(repository.database_path),
             )
             client = TestClient(create_app(settings, repository))
             headers = {"X-Telegram-Init-Data": signed_init_data("123:token", 1)}

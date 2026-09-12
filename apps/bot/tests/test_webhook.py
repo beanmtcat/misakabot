@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import tempfile
 import unittest
-from pathlib import Path
 
 from fastapi.testclient import TestClient
 
@@ -58,7 +57,6 @@ class WebhookTests(unittest.TestCase):
         self.settings = Settings(
             telegram_bot_token="123:token",
             admin_user_ids=frozenset({1}),
-            audit_database_path=Path(self.repository.database_path),
             telegram_transport="webhook",
             telegram_webhook_url="https://dashboard.example/telegram/webhook",
             telegram_webhook_secret="expected-secret",

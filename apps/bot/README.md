@@ -58,14 +58,14 @@ cp .env.example .env
 ```bash
 docker build -t misakabot:local .
 docker run -d --name misakabot --env-file .env \
-  -v "$(pwd)/data:/app/data" misakabot:local
+  misakabot:local
 ```
 
 镜像默认启动 Telegram 长轮询机器人。启动管理员审计 API 时覆盖命令，并仅在受信任网络中暴露端口：
 
 ```bash
 docker run --rm --env-file .env -p 127.0.0.1:8080:8080 \
-  -v "$(pwd)/data:/app/data" misakabot:local misakabot-api
+  misakabot:local misakabot-api
 ```
 
 也可使用 Docker Compose：
@@ -87,8 +87,6 @@ docker compose --profile audit up -d --build  # 同时启动本机审计 API
 Compose 的配置值直接写在 [compose.yaml](compose.yaml)；启动前请把 `TELEGRAM_BOT_TOKEN`、群组与管理员 ID，以及所用大模型的 Key/模型名替换为真实值。不要将包含真实密钥的 Compose 文件提交到公开仓库。
 
 运行中的服务加入现有 `docker_default` 网络；镜像构建阶段使用 Docker 的 `host` 网络模式。构建网络模式不能填写 Docker 网络名。
-
-审计 SQLite 数据会持久化在宿主机 `/data/misakabot`。Compose 会先运行一次 `data-init` 服务，将该目录的写权限授予容器服务用户（UID/GID `10001`），随后才启动机器人和审计 API。
 
 审计 API 仅映射到 `127.0.0.1:8080`；如需经由反向代理提供 Mini App 访问，请在代理层做 TLS 与访问控制，不要直接把 API 端口暴露到公网。
 
