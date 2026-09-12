@@ -60,6 +60,11 @@ class LegacyEmbyRepository:
         value = row["password"] if row else None
         return value if isinstance(value, str) else None
 
+    def is_login_enabled(self, username: str) -> bool:
+        return self._one(
+            "SELECT 1 FROM dragonli_users WHERE username=%s AND islogin=TRUE", (username,)
+        ) is not None
+
     def save_watch_session(self, session: WatchSession) -> bool:
         existing = self._one(
             "SELECT id FROM dragonli_emby_watch_logs WHERE session_id=%s AND item_id=%s ORDER BY id DESC LIMIT 1",

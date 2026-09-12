@@ -1,4 +1,9 @@
 export const API_PREFIX = import.meta.env.VITE_API_PREFIX || '/emby-manager';
+let csrfToken = '';
+
+export function setCsrfToken(value) {
+  csrfToken = typeof value === 'string' ? value : '';
+}
 
 export function embyItemUrl(itemId, serverId) {
   const query = serverId ? `?server_id=${encodeURIComponent(serverId)}` : '';
@@ -6,10 +11,15 @@ export function embyItemUrl(itemId, serverId) {
 }
 
 export async function api(path, options = {}) {
+  const method = String(options.method || 'GET').toUpperCase();
+  const headers = { 'Content-Type': 'application/json', ...(options.headers || {}) };
+  if (!['GET', 'HEAD', 'OPTIONS'].includes(method) && csrfToken && path !== '/auth/login') {
+    headers['X-CSRF-Token'] = csrfToken;
+  }
   const response = await fetch(`${API_PREFIX}${path}`, {
     credentials: 'same-origin',
     ...options,
-    headers: { 'Content-Type': 'application/json', ...(options.headers || {}) },
+    headers,
   });
   if (!response.ok) {
     const body = await response.json().catch(() => ({}));

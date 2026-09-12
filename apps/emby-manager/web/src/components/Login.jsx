@@ -15,7 +15,7 @@ export default function Login({ onLogin }) {
       const session = await api('/auth/login', {
         method: 'POST', body: JSON.stringify({ username, password }),
       });
-      onLogin(session.username);
+      onLogin(session);
     } catch (reason) {
       setError(reason.message);
     } finally {

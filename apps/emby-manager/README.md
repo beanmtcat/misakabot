@@ -20,12 +20,20 @@ docker compose up -d --build
 ```
 
 服务默认监听 `127.0.0.1:8084`。访问 `/emby-manager/` 即可打开独立 React 浏览器后台，
-不依赖 Telegram Mini App。它复用 `dragonli_users` 中 `islogin=true` 用户的 PHP bcrypt 密码，
+不依赖 Telegram Mini App。它复用 `dragonli_users` 中指定管理员账号的 PHP bcrypt 密码，
 并创建本服务自己的 HttpOnly 会话 Cookie；不读取或改写 Dragonli 的 session / remember token。
+`EMBY_MANAGER_ADMIN_USERNAMES` 是必填的逗号分隔 Dragonli 用户名白名单；普通 `islogin=true`
+用户不能访问后台。
 
 因此，直接访问地址为 `http://127.0.0.1:8084/emby-manager/`，生产环境为
 `https://your-domain/emby-manager/`。反向代理应将这个路径原样转发到服务，不能剥离
 `/emby-manager` 前缀。
+
+生产环境必须设置 `SESSION_HTTPS_ONLY=true` 与 `EMBY_MANAGER_ORIGIN=https://你的管理域名`。
+登录按“来源 IP + 用户名”在内存中限流，默认 15 分钟内最多 5 次失败；失败、限流、CSRF 拒绝
+和会话撤销会写入服务的结构化安全日志。会话同时保存在服务端内存登记表中：退出登录、服务
+重启、账号从管理员白名单移除或 `islogin` 被关闭后，已有 Cookie 立即失效。所有写接口要求
+同源 `Origin` 和每会话 CSRF Token。
 
 Docker 镜像会自动使用 `/app/web/dist`。仅在非 Docker 部署且前端构建文件不在项目默认
 `web/dist` 目录时，才需要设置 `EMBY_WEB_ROOT`。

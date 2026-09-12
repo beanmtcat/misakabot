@@ -17,9 +17,9 @@ from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 from starlette.middleware.sessions import SessionMiddleware
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
-from .auth import require_admin
+from .auth import LoginRateLimiter
 from .config import Settings
 from .emby_client import EmbyClient, EmbyItemNotFoundError
 from .moviepilot_client import MoviePilotClient
@@ -49,14 +49,53 @@ def _path_map_signature(
     ).hexdigest()
 
 
+class SessionRegistry:
+    """Server-side session registry: logout and service restart revoke signed cookies."""
+
+    def __init__(self, max_age_seconds: int) -> None:
+        self._max_age_seconds = max_age_seconds
+        self._sessions: dict[str, tuple[str, float]] = {}
+        self._lock = asyncio.Lock()
+
+    async def issue(self, username: str) -> str:
+        session_id = secrets.token_urlsafe(32)
+        async with self._lock:
+            self._purge()
+            self._sessions[session_id] = (username, time.monotonic() + self._max_age_seconds)
+        return session_id
+
+    async def is_active(self, session_id: str, username: str) -> bool:
+        async with self._lock:
+            self._purge()
+            value = self._sessions.get(session_id)
+            return value is not None and value[0] == username
+
+    async def revoke(self, session_id: str) -> None:
+        async with self._lock:
+            self._sessions.pop(session_id, None)
+
+    async def revoke_user(self, username: str) -> None:
+        async with self._lock:
+            self._purge()
+            for session_id, (known_username, _) in list(self._sessions.items()):
+                if known_username == username:
+                    del self._sessions[session_id]
+
+    def _purge(self) -> None:
+        now = time.monotonic()
+        for session_id, (_, expires_at) in list(self._sessions.items()):
+            if expires_at <= now:
+                del self._sessions[session_id]
+
+
 class PolicyChange(BaseModel):
     is_disabled: bool | None = None
     enable_remote_access: bool | None = None
 
 
 class LoginRequest(BaseModel):
-    username: str
-    password: str
+    username: str = Field(min_length=1, max_length=50)
+    password: str = Field(min_length=1, max_length=256)
 
 
 class TrackingChange(BaseModel):
@@ -91,8 +130,51 @@ def create_app(
         settings.moviepilot_sqlite_path,
     )
     sync_lock = asyncio.Lock()
+    session_registry = SessionRegistry(86400)
+    login_rate_limiter = LoginRateLimiter(
+        settings.login_rate_limit_attempts, settings.login_rate_limit_window_seconds
+    )
     path_map_nonce_lock = asyncio.Lock()
     path_map_seen_nonces: dict[str, int] = {}
+
+    def audit_address(request: Request) -> str:
+        return request.headers.get("X-Real-IP", "").strip() or (
+            request.client.host if request.client else "unknown"
+        )
+
+    def require_same_origin(request: Request) -> None:
+        origin = request.headers.get("Origin", "").rstrip("/").lower()
+        if origin != settings.manager_origin:
+            logger.warning("security.origin_rejected remote_addr=%s origin=%r", audit_address(request), origin)
+            raise HTTPException(status_code=403, detail="请求来源不被允许")
+
+    async def require_management_admin(request: Request) -> str:
+        username = request.session.get("username")
+        session_id = request.session.get("session_id")
+        if not isinstance(username, str) or not isinstance(session_id, str):
+            raise HTTPException(status_code=401, detail="请先登录")
+        if (
+            username.casefold() not in settings.manager_admin_usernames
+            or not await session_registry.is_active(session_id, username)
+            or not manager.is_login_enabled(username)
+        ):
+            await session_registry.revoke(session_id)
+            request.session.clear()
+            logger.warning("security.session_revoked username=%s remote_addr=%s", username, audit_address(request))
+            raise HTTPException(status_code=401, detail="登录会话已失效")
+        return username
+
+    async def require_write_authorization(request: Request) -> str:
+        username = await require_management_admin(request)
+        require_same_origin(request)
+        expected_csrf_token = request.session.get("csrf_token")
+        supplied_csrf_token = request.headers.get("X-CSRF-Token", "")
+        if not isinstance(expected_csrf_token, str) or not secrets.compare_digest(
+            supplied_csrf_token, expected_csrf_token
+        ):
+            logger.warning("security.csrf_rejected username=%s remote_addr=%s", username, audit_address(request))
+            raise HTTPException(status_code=403, detail="CSRF 校验失败")
+        return username
     sync_status: dict[str, dict[str, object | None]] = {
         "users": {"last_success_at": None, "last_result": None},
         "series": {"last_success_at": None, "last_result": None},
@@ -296,20 +378,54 @@ def create_app(
         return FileResponse(web_root / "index.html")
 
     @app.post(f"{APP_PREFIX}/auth/login")
-    def login(payload: LoginRequest, request: Request) -> dict[str, str]:
+    async def login(payload: LoginRequest, request: Request) -> dict[str, str]:
         username = payload.username.strip()
-        if not username or not payload.password or not manager.authenticate(username, payload.password):
+        require_same_origin(request)
+        rate_limit_key = f"{audit_address(request)}:{username.casefold()}"
+        retry_after = login_rate_limiter.retry_after(rate_limit_key)
+        if retry_after:
+            logger.warning(
+                "security.login_rate_limited username=%s remote_addr=%s retry_after=%s",
+                username,
+                audit_address(request),
+                retry_after,
+            )
+            raise HTTPException(
+                status_code=429,
+                detail="登录尝试过于频繁，请稍后再试",
+                headers={"Retry-After": str(retry_after)},
+            )
+        if (
+            not username
+            or username.casefold() not in settings.manager_admin_usernames
+            or not payload.password
+            or not manager.authenticate(username, payload.password)
+        ):
+            login_rate_limiter.record_failure(rate_limit_key)
+            logger.warning("security.login_failed username=%s remote_addr=%s", username, audit_address(request))
             raise HTTPException(status_code=401, detail="用户名或密码不正确")
         request.session.clear()
+        await session_registry.revoke_user(username)
+        request.session["session_id"] = await session_registry.issue(username)
         request.session["username"] = username
-        return {"username": username}
+        csrf_token = secrets.token_urlsafe(32)
+        request.session["csrf_token"] = csrf_token
+        login_rate_limiter.reset(rate_limit_key)
+        logger.info("security.login_succeeded username=%s remote_addr=%s", username, audit_address(request))
+        return {"username": username, "csrf_token": csrf_token}
 
     @app.get(f"{APP_PREFIX}/auth/session")
-    async def session(username: str = Depends(require_admin)) -> dict[str, str]:
-        return {"username": username}
+    async def session(request: Request, username: str = Depends(require_management_admin)) -> dict[str, str]:
+        csrf_token = request.session.get("csrf_token")
+        if not isinstance(csrf_token, str):
+            raise HTTPException(status_code=401, detail="登录会话已失效")
+        return {"username": username, "csrf_token": csrf_token}
 
     @app.post(f"{APP_PREFIX}/auth/logout")
-    def logout(request: Request) -> Response:
+    async def logout(request: Request, _: str = Depends(require_write_authorization)) -> Response:
+        session_id = request.session.get("session_id")
+        if isinstance(session_id, str):
+            await session_registry.revoke(session_id)
         request.session.clear()
         return Response(status_code=204)
 
@@ -317,37 +433,37 @@ def create_app(
     def list_users(
         page: int = Query(1, ge=1), size: int = Query(30, ge=1, le=100),
         query: str | None = Query(None, max_length=100), is_disabled: bool | None = None,
-        _: str = Depends(require_admin),
+        _: str = Depends(require_management_admin),
     ) -> dict[str, object]:
         return manager.list_users(page, size, query, is_disabled)
 
     @app.post(f"{APP_PREFIX}/v1/emby/users/sync")
-    async def sync_users(_: str = Depends(require_admin)) -> dict[str, int]:
+    async def sync_users(_: str = Depends(require_write_authorization)) -> dict[str, int]:
         return await _remote_operation(run_user_sync())
 
     @app.get(f"{APP_PREFIX}/v1/emby/login-logs")
     def list_login_logs(
         page: int = Query(1, ge=1), size: int = Query(20, ge=1, le=100),
-        query: str | None = Query(None, max_length=100), _: str = Depends(require_admin),
+        query: str | None = Query(None, max_length=100), _: str = Depends(require_management_admin),
     ) -> dict[str, object]:
         return manager.list_login_logs(page, size, query)
 
     @app.post(f"{APP_PREFIX}/v1/emby/login-logs/sync")
-    async def sync_login_logs(_: str = Depends(require_admin)) -> dict[str, int]:
+    async def sync_login_logs(_: str = Depends(require_write_authorization)) -> dict[str, int]:
         return await _remote_operation(run_login_sync())
 
     @app.get(f"{APP_PREFIX}/v1/emby/sync-status")
-    def get_sync_status(_: str = Depends(require_admin)) -> dict[str, dict[str, object | None]]:
+    def get_sync_status(_: str = Depends(require_management_admin)) -> dict[str, dict[str, object | None]]:
         return sync_status
 
     @app.get(f"{APP_PREFIX}/v1/emby/dashboard")
-    def dashboard(_: str = Depends(require_admin)) -> dict[str, object]:
+    def dashboard(_: str = Depends(require_management_admin)) -> dict[str, object]:
         return manager.dashboard()
 
     @app.get(f"{APP_PREFIX}/v1/emby/movies")
     def list_movies(
         page: int = Query(1, ge=1), size: int = Query(20, ge=1, le=100),
-        query: str | None = Query(None, max_length=100), _: str = Depends(require_admin),
+        query: str | None = Query(None, max_length=100), _: str = Depends(require_management_admin),
     ) -> dict[str, object]:
         return manager.list_movies(page, size, query)
 
@@ -355,7 +471,7 @@ def create_app(
     def open_emby_item(
         item_id: str,
         server_id: str | None = Query(None, max_length=100),
-        _: str = Depends(require_admin),
+        _: str = Depends(require_management_admin),
     ) -> RedirectResponse:
         fragment = f"!/item?id={quote(item_id, safe='')}"
         if server_id:
@@ -369,12 +485,12 @@ def create_app(
         query: str | None = Query(None, max_length=100), tracking: bool | None = None,
         state: str | None = Query(None, pattern="^(today|exception)$"),
         all_items: bool = False,
-        _: str = Depends(require_admin),
+        _: str = Depends(require_management_admin),
     ) -> dict[str, object]:
         return manager.list_series(page, None if all_items else size, query, tracking, state)
 
     @app.get(f"{APP_PREFIX}/v1/emby/libraries")
-    def list_libraries(_: str = Depends(require_admin)) -> dict[str, object]:
+    def list_libraries(_: str = Depends(require_management_admin)) -> dict[str, object]:
         return {"items": manager.list_libraries()}
 
     async def require_path_map_request_signature(request: Request) -> None:
@@ -438,7 +554,7 @@ def create_app(
         return PlainTextResponse("\n".join(await manager.series_path_lines_for_node(node_id)))
 
     @app.get(f"{APP_PREFIX}/v1/emby/series/{{series_id}}")
-    def series_detail(series_id: int, _: str = Depends(require_admin)) -> dict[str, object]:
+    def series_detail(series_id: int, _: str = Depends(require_management_admin)) -> dict[str, object]:
         detail = manager.series_detail(series_id)
         if detail is None:
             raise HTTPException(status_code=404, detail="电视剧不存在或已失效")
@@ -446,33 +562,33 @@ def create_app(
 
     @app.put(f"{APP_PREFIX}/v1/emby/series/{{series_id}}")
     def update_series_detail(
-        series_id: int, change: SeriesDetailChange, _: str = Depends(require_admin)
+        series_id: int, change: SeriesDetailChange, _: str = Depends(require_write_authorization)
     ) -> dict[str, object]:
         if not manager.update_series_detail(series_id, change.model_dump()):
             raise HTTPException(status_code=404, detail="电视剧不存在或已失效")
         return {"id": series_id, "updated": True}
 
     @app.get(f"{APP_PREFIX}/v1/emby/series/{{series_id}}/episode-comparison")
-    def episode_comparison(series_id: int, _: str = Depends(require_admin)) -> dict[str, object]:
+    def episode_comparison(series_id: int, _: str = Depends(require_management_admin)) -> dict[str, object]:
         result = manager.episode_comparison(series_id)
         if result is None:
             raise HTTPException(status_code=404, detail="电视剧不存在或已失效")
         return result
 
     @app.post(f"{APP_PREFIX}/v1/emby/series/sync")
-    async def sync_series(_: str = Depends(require_admin)) -> dict[str, int]:
+    async def sync_series(_: str = Depends(require_write_authorization)) -> dict[str, int]:
         return await _remote_operation(run_series_sync())
 
     @app.patch(f"{APP_PREFIX}/v1/emby/series/{{series_id}}/tracking")
     def set_series_tracking(
-        series_id: int, change: TrackingChange, _: str = Depends(require_admin)
+        series_id: int, change: TrackingChange, _: str = Depends(require_write_authorization)
     ) -> dict[str, object]:
         if not manager.set_series_tracking(series_id, change.tracking):
             raise HTTPException(status_code=404, detail="电视剧不存在或已失效")
         return {"id": series_id, "tracking": change.tracking}
 
     @app.post(f"{APP_PREFIX}/v1/emby/series/tracking/sync")
-    async def sync_series_tracking(_: str = Depends(require_admin)) -> dict[str, object]:
+    async def sync_series_tracking(_: str = Depends(require_write_authorization)) -> dict[str, object]:
         if not settings.tmdb_api_token and not (
             settings.moviepilot_base_url and settings.moviepilot_api_token
         ):
@@ -480,12 +596,12 @@ def create_app(
         return await _remote_operation(run_full_tracking_sync())
 
     @app.post(f"{APP_PREFIX}/v1/emby/series/{{series_id}}/sync")
-    async def sync_one_series(series_id: int, _: str = Depends(require_admin)) -> dict[str, object]:
+    async def sync_one_series(series_id: int, _: str = Depends(require_write_authorization)) -> dict[str, object]:
         return await _remote_operation(run_one_series_sync(series_id))
 
     @app.patch(f"{APP_PREFIX}/v1/emby/users/{{user_id}}/policy")
     async def update_policy(
-        user_id: str, change: PolicyChange, _: str = Depends(require_admin)
+        user_id: str, change: PolicyChange, _: str = Depends(require_write_authorization)
     ) -> dict[str, object]:
         try:
             user = await manager.update_user_policy(
@@ -503,12 +619,12 @@ def create_app(
         page: int = Query(1, ge=1), size: int = Query(30, ge=1, le=100),
         query: str | None = Query(None, max_length=100), item_type: str | None = Query(None, max_length=50),
         start_at: str | None = None, end_at: str | None = None,
-        item_id: str | None = Query(None, max_length=255), _: str = Depends(require_admin),
+        item_id: str | None = Query(None, max_length=255), _: str = Depends(require_management_admin),
     ) -> dict[str, object]:
         return manager.list_watch_logs(page, size, query, item_type, start_at, end_at, item_id)
 
     @app.post(f"{APP_PREFIX}/v1/emby/watch-logs/sync")
-    async def sync_watch_logs(_: str = Depends(require_admin)) -> dict[str, int]:
+    async def sync_watch_logs(_: str = Depends(require_write_authorization)) -> dict[str, int]:
         return await _remote_operation(run_watch_sync())
 
     return app

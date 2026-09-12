@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import Login from './components/Login';
-import { api } from './lib/api';
+import { api, setCsrfToken } from './lib/api';
 import UsersPage from './features/users/UsersPage';
 import WatchLogsPage from './features/watch/WatchLogsPage';
 import LoginLogsPage from './features/login/LoginLogsPage';
@@ -43,7 +43,7 @@ function AppContent() {
   const [notice, setNotice] = useState(null);
   const [theme, setTheme] = useState(() => window.localStorage.getItem('emby-manager-theme') || 'dark');
   function notify(message, error = false) { setNotice({ message, error }); window.setTimeout(() => setNotice(null), 3000); }
-  useEffect(() => { api('/auth/session').then((session) => setUsername(session.username)).catch(() => setUsername(false)); }, []);
+  useEffect(() => { api('/auth/session').then((session) => { setCsrfToken(session.csrf_token); setUsername(session.username); }).catch(() => { setCsrfToken(''); setUsername(false); }); }, []);
   useEffect(() => { document.documentElement.dataset.theme = theme; window.localStorage.setItem('emby-manager-theme', theme); }, [theme]);
   useEffect(() => {
     const url = new URL(window.location.href);
@@ -56,9 +56,9 @@ function AppContent() {
     window.addEventListener('popstate', restorePage);
     return () => window.removeEventListener('popstate', restorePage);
   }, []);
-  async function logout() { await api('/auth/logout', { method: 'POST' }); setUsername(false); }
+  async function logout() { await api('/auth/logout', { method: 'POST' }); setCsrfToken(''); setUsername(false); }
   if (username === null) return <main className="login-shell"><p className="loading-copy">正在验证访问权限…</p></main>;
-  if (!username) return <Login onLogin={setUsername} />;
+  if (!username) return <Login onLogin={(session) => { setCsrfToken(session.csrf_token); setUsername(session.username); }} />;
   const active = navigation.flatMap((item) => item.children || [item]).find((item) => item.id === page);
   return <main className="app-shell">
     <aside className="sidebar">

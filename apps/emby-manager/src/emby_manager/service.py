@@ -41,6 +41,9 @@ class EmbyManagementService:
         password_hash = self._repository.login_password_hash(username)
         return password_hash is not None and verify_password(password, password_hash)
 
+    def is_login_enabled(self, username: str) -> bool:
+        return self._repository.is_login_enabled(username)
+
     def list_users(self, page: int, size: int, query: str | None, disabled: bool | None) -> dict[str, object]:
         return self._repository.list_users(page, size, query, disabled)
 

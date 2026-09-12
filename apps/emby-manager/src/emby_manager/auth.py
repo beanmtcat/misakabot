@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import bcrypt
-from fastapi import HTTPException, Request
+from collections import deque
+from threading import Lock
+from time import monotonic
 
 
 def verify_password(password: str, password_hash: str) -> bool:
@@ -15,8 +17,34 @@ def verify_password(password: str, password_hash: str) -> bool:
         return False
 
 
-async def require_admin(request: Request) -> str:
-    username = request.session.get("username")
-    if not isinstance(username, str) or not username:
-        raise HTTPException(status_code=401, detail="请先登录")
-    return username
+class LoginRateLimiter:
+    """Small in-process guard for password guessing; no database schema is required."""
+
+    def __init__(self, max_failures: int, window_seconds: int) -> None:
+        self._max_failures = max_failures
+        self._window_seconds = window_seconds
+        self._failures: dict[str, deque[float]] = {}
+        self._lock = Lock()
+
+    def retry_after(self, key: str) -> int:
+        now = monotonic()
+        with self._lock:
+            attempts = self._prune(key, now)
+            if len(attempts) < self._max_failures:
+                return 0
+            return max(1, int(self._window_seconds - (now - attempts[0])) + 1)
+
+    def record_failure(self, key: str) -> None:
+        now = monotonic()
+        with self._lock:
+            self._prune(key, now).append(now)
+
+    def reset(self, key: str) -> None:
+        with self._lock:
+            self._failures.pop(key, None)
+
+    def _prune(self, key: str, now: float) -> deque[float]:
+        attempts = self._failures.setdefault(key, deque())
+        while attempts and now - attempts[0] >= self._window_seconds:
+            attempts.popleft()
+        return attempts

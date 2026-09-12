@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import urlsplit
 
 
 def _positive_seconds(name: str, default: int) -> int:
@@ -14,6 +15,17 @@ def _positive_seconds(name: str, default: int) -> int:
     if value <= 0:
         raise RuntimeError(f"{name} must be a positive integer number of seconds")
     return value
+
+
+def _csv_values(value: str) -> frozenset[str]:
+    return frozenset(item.strip().casefold() for item in value.split(",") if item.strip())
+
+
+def _origin(value: str) -> str:
+    parsed = urlsplit(value.strip())
+    if parsed.scheme not in {"http", "https"} or not parsed.netloc or parsed.path not in {"", "/"}:
+        raise RuntimeError("EMBY_MANAGER_ORIGIN must be an http(s) origin without a path")
+    return f"{parsed.scheme}://{parsed.netloc}".lower()
 
 
 @dataclass(frozen=True)
@@ -39,6 +51,10 @@ class Settings:
     moviepilot_sqlite_path: Path | None = None
     moviepilot_sync_interval_seconds: int = 1800
     path_map_api_secret: str = ""
+    manager_admin_usernames: frozenset[str] = frozenset()
+    manager_origin: str = ""
+    login_rate_limit_attempts: int = 5
+    login_rate_limit_window_seconds: int = 900
 
     @classmethod
     def from_environment(cls) -> "Settings":
@@ -53,6 +69,10 @@ class Settings:
             raise RuntimeError(f"Missing required configuration: {', '.join(missing)}")
         if not values["DATABASE_URL"].startswith(("postgres://", "postgresql://")):
             raise RuntimeError("DATABASE_URL must be a PostgreSQL URL")
+        manager_admin_usernames = _csv_values(os.environ.get("EMBY_MANAGER_ADMIN_USERNAMES", ""))
+        if not manager_admin_usernames:
+            raise RuntimeError("EMBY_MANAGER_ADMIN_USERNAMES must contain at least one username")
+        manager_origin = _origin(os.environ.get("EMBY_MANAGER_ORIGIN", ""))
         return cls(
             database_url=values["DATABASE_URL"],
             emby_base_url=values["EMBY_BASE_URL"],
@@ -94,5 +114,11 @@ class Settings:
             path_map_api_secret=(
                 os.environ.get("EMBY_PATH_MAP_API_SECRET", "").strip()
                 or os.environ.get("EMBY_PATH_MAP_API_TOKEN", "").strip()
+            ),
+            manager_admin_usernames=manager_admin_usernames,
+            manager_origin=manager_origin,
+            login_rate_limit_attempts=_positive_seconds("EMBY_LOGIN_RATE_LIMIT_ATTEMPTS", 5),
+            login_rate_limit_window_seconds=_positive_seconds(
+                "EMBY_LOGIN_RATE_LIMIT_WINDOW_SECONDS", 900
             ),
         )
