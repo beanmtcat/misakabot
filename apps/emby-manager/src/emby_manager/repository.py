@@ -789,22 +789,24 @@ class LegacyEmbyRepository:
             )
             if official and official["latest"] is not None:
                 official_latest = int(official["latest"])
-            missing = self._one(
-                '''SELECT MAX(tmdb.air_date) AS air_date FROM dragonli_tmdb_episodes tmdb
-                WHERE tmdb.tid=%s AND tmdb.season_number=%s AND tmdb.isvalid=1
-                  AND tmdb.air_date IS NOT NULL AND tmdb.air_date <= CURRENT_DATE
-                  AND NOT EXISTS (
-                    SELECT 1 FROM dragonli_emby_episodes emby
-                    WHERE emby.isvalid=1 AND emby.series_id=%s
-                      AND emby.parent_index_number=%s
-                      AND emby.index_number=tmdb.episode_number
-                  )''',
-                (series_id, season_number, series_id, season_number),
-            )
-            if missing and missing["air_date"] is not None:
-                # An aired episode still absent from Emby is the actionable next
-                # update. Do not hide it behind the following week's schedule.
-                next_update = str(missing["air_date"])
+            if official_latest is not None:
+                missing = self._one(
+                    '''SELECT MAX(tmdb.air_date) AS air_date FROM dragonli_tmdb_episodes tmdb
+                    WHERE tmdb.tid=%s AND tmdb.season_number=%s AND tmdb.isvalid=1
+                      AND tmdb.air_date IS NOT NULL AND tmdb.episode_number <= %s
+                      AND NOT EXISTS (
+                        SELECT 1 FROM dragonli_emby_episodes emby
+                        WHERE emby.isvalid=1 AND emby.series_id=%s
+                          AND emby.parent_index_number=%s
+                          AND emby.index_number=tmdb.episode_number
+                      )''',
+                    (series_id, season_number, official_latest, series_id, season_number),
+                )
+                if missing and missing["air_date"] is not None:
+                    # Use the known aired episode range, rather than the database
+                    # server's calendar day, so host/database time zones cannot
+                    # hide an episode that the tracking snapshot already marks aired.
+                    next_update = str(missing["air_date"])
         self._write(
             '''UPDATE dragonli_emby_series SET
               season=%s,season_number=%s,server_latest=%s,official_latest=%s,next_update=%s,
