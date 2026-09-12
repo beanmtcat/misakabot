@@ -26,6 +26,7 @@ function rowStateClass(item) {
   const today = shanghaiDate();
   if (Number(item.node_status) === 0) return 'series-row-danger';
   if (nextUpdate && nextUpdate < today) return 'series-row-stale';
+  if (nextUpdate > today && Number(item.episode_count) < Number(item.official_latest)) return 'series-row-stale';
   if (Number(item.total) > 0 && Number(item.episode_count) === Number(item.total)) return 'series-row-complete';
   if (Number(item.official_latest) > 0 && Number(item.local_latest) === Number(item.official_latest) && Number(item.episode_count) === Number(item.official_latest)) return 'series-row-caught-up';
   if (nextUpdate === today) return 'series-row-today';
