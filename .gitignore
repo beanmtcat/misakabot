@@ -1,0 +1,34 @@
+.venv/
+__pycache__/
+*.py[cod]
+.env
+.env.*
+!.env.example
+.deploy.env
+*.pem
+*.key
+*.p12
+*.pfx
+*.db
+*.sqlite
+*.sqlite3
+.DS_Store
+compose.yaml
+deploy.sh
+/data/
+.pytest_cache/
+
+# Build and package metadata
+build/
+*.egg-info/
+**/__pycache__/
+**/node_modules/
+**/dist/
+**/.next/
+**/.vinext/
+**/.wrangler/
+
+# Local service state and exported personal data
+local/
+apps/emby-manager/path_map.txt
+apps/emby-manager/transfer_config.json
