@@ -33,3 +33,4 @@ local/
 docs/
 apps/emby-manager/path_map.txt
 apps/emby-manager/transfer_config.json
+apps/audit-miniapp/.openai/
