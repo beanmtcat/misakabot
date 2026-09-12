@@ -8,13 +8,15 @@ const PAGE_SIZE = 20;
 const blankDetail = { tracking: true, library_name: '', themoviedb: '', quark: '', alipan: '', alias: '', lock_season: '', index_name: '' };
 
 function updateState(item) {
-  if (item.server_latest || item.official_latest) return `本服 ${item.server_latest || 0} / 已播 ${item.official_latest || '—'}`;
+  const localCount = Number(item.episode_count || 0);
+  const localLatest = Number(item.local_latest || 0);
+  if (localCount || item.official_latest) return `本服 ${localCount} 集${localLatest ? `（至第 ${localLatest} 集）` : ''} / 已播 ${item.official_latest || '—'}`;
   return item.update_time ? formatTime(item.update_time) : '暂无更新信息';
 }
 
 function rowStateClass(item) {
   if (Number(item.node_status) === 0) return 'series-row-danger';
-  if (Number(item.official_latest) > 0 && Number(item.server_latest) === Number(item.official_latest)) return 'series-row-complete';
+  if (Number(item.official_latest) > 0 && Number(item.local_latest) === Number(item.official_latest) && Number(item.episode_count) === Number(item.official_latest)) return 'series-row-complete';
   if (String(item.next_update || '').slice(0, 10) === new Date().toISOString().slice(0, 10)) return 'series-row-today';
   return '';
 }
@@ -171,7 +173,7 @@ export default function SeriesPage({ notify, archived = false }) {
       {series.map((item) => <tr key={item.id} className={rowStateClass(item)}>
         <td>{Number(item.id) > 0 && item.server_id ? <a className="emby-item-link" href={embyItemUrl(item.id, item.server_id)} target="_blank" rel="noreferrer">{seriesTitle(item)}</a> : <strong>{seriesTitle(item)}</strong>}<small>{item.index_name || '—'} · ID {item.id}{item.themoviedb ? ` · TMDB ${item.themoviedb}` : ''}</small></td>
         <td><span className={`node-state ${item.node_status === 1 ? 'online' : ''}`}><i />{item.node_name}</span><small>{item.library_name}</small></td>
-        <td><span className="episode-count">{item.season || (item.season_number ? `第 ${item.season_number} 季` : '季数未知')}</span><small>{item.total ? `共 ${item.total} 集` : `本服 ${item.episode_count || 0} 集`}</small></td>
+        <td><span className="episode-count">{item.season || (item.season_number ? `第 ${item.season_number} 季` : '季数未知')}</span><small>{item.total ? `官方共 ${item.total} 集 · 本服 ${item.episode_count || 0} 集` : `本服 ${item.episode_count || 0} 集`}</small></td>
         <td><button className="table-link" onClick={() => openComparison(item)}>{updateState(item)}</button><small>点击查看逐集对比</small></td>
         <td>{formatDate(item.next_update)}<small>同步 {formatTime(item.mtime)}</small></td>
         <td className="action-cell"><div className="series-actions">{Number(item.id) > 0 && item.server_id && <button className="secondary compact" onClick={() => syncOneSeries(item)} disabled={Boolean(syncingId) || syncing}>{String(syncingId) === String(item.id) ? '同步中…' : '同步'}</button>}<button className="secondary compact" onClick={() => openSettings(item)} disabled={Boolean(syncingId) || syncing}>设置</button>{item.alipan && <a className="cloud-link" href={item.alipan} target="_blank" rel="noreferrer">阿里</a>}{item.quark && <a className="cloud-link quark" href={item.quark} target="_blank" rel="noreferrer">夸克</a>}</div></td>

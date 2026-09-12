@@ -487,14 +487,18 @@ class LegacyEmbyRepository:
             s.server_latest,s.official_latest,s.update_time,s.next_update,s.mtime,s.total,s."update" AS tracking,
             s.themoviedb,s.quark,s.alipan,s.alias,s.index_name,
             COALESCE(l.name,'—') AS library_name,COALESCE(n.name,'—') AS node_name,n.status AS node_status,
-            COALESCE(e.episode_count,0) AS episode_count,e.latest_episode
+            COALESCE(e.episode_count,0) AS episode_count,COALESCE(e.latest_index,0) AS local_latest,
+            e.latest_episode
             FROM dragonli_emby_series s
             LEFT JOIN dragonli_library_subfolders l ON l.seq=s.parent_id
             LEFT JOIN dragonli_storage_nodes n ON n.seq=l.node_id
-            LEFT JOIN (
-              SELECT series_id,COUNT(*) AS episode_count,MAX(date_created) AS latest_episode
-              FROM dragonli_emby_episodes WHERE isvalid=1 GROUP BY series_id
-            ) e ON e.series_id=s.id
+            LEFT JOIN LATERAL (
+              SELECT COUNT(*) AS episode_count,MAX(index_number) AS latest_index,MAX(date_created) AS latest_episode
+              FROM dragonli_emby_episodes episode
+              WHERE episode.isvalid=1 AND episode.series_id=s.id
+                AND (COALESCE(s.lock_season,s.season_number) IS NULL
+                  OR episode.parent_index_number=COALESCE(s.lock_season,s.season_number))
+            ) e ON TRUE
             WHERE {where}
             ORDER BY s.index_name ASC NULLS LAST,s.name ASC{pagination}""",
             row_parameters,
