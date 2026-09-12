@@ -466,8 +466,9 @@ class LegacyEmbyRepository:
             clauses.append("s.next_update=CURRENT_DATE")
         elif state == "exception":
             clauses.append(
-                "s.official_latest > 0 AND COALESCE(s.server_latest,0) != s.official_latest "
-                "AND (s.next_update IS NULL OR s.next_update != CURRENT_DATE)"
+                "(s.next_update IS NOT NULL AND s.next_update < CURRENT_DATE) OR "
+                "(s.official_latest > 0 AND COALESCE(s.server_latest,0) != s.official_latest "
+                "AND (s.next_update IS NULL OR s.next_update != CURRENT_DATE))"
             )
         where = " AND ".join(clauses)
         total = self._one(f"SELECT COUNT(*) AS count FROM dragonli_emby_series s WHERE {where}", parameters)
@@ -476,8 +477,9 @@ class LegacyEmbyRepository:
         )
         following_counts = self._one(
             '''SELECT COUNT(*) FILTER (WHERE next_update=CURRENT_DATE) AS today,
-            COUNT(*) FILTER (WHERE official_latest > 0 AND COALESCE(server_latest,0) != official_latest
-              AND (next_update IS NULL OR next_update != CURRENT_DATE)) AS exception
+            COUNT(*) FILTER (WHERE (next_update IS NOT NULL AND next_update < CURRENT_DATE) OR
+              (official_latest > 0 AND COALESCE(server_latest,0) != official_latest
+              AND (next_update IS NULL OR next_update != CURRENT_DATE))) AS exception
             FROM dragonli_emby_series WHERE isvalid=1 AND "update" IS TRUE'''
         ) or {}
         pagination = "" if size is None else " LIMIT %s OFFSET %s"

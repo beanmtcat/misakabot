@@ -7,6 +7,14 @@ import './MediaPages.css';
 const PAGE_SIZE = 20;
 const blankDetail = { tracking: true, library_name: '', themoviedb: '', quark: '', alipan: '', alias: '', lock_season: '', index_name: '' };
 
+function shanghaiDate() {
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Shanghai', year: 'numeric', month: '2-digit', day: '2-digit',
+  }).formatToParts(new Date());
+  const values = Object.fromEntries(parts.map(({ type, value }) => [type, value]));
+  return `${values.year}-${values.month}-${values.day}`;
+}
+
 function updateState(item) {
   const localCount = Number(item.episode_count || 0);
   if (localCount || item.official_latest) return `本服 ${localCount} / 已播 ${item.official_latest || '—'}`;
@@ -14,10 +22,13 @@ function updateState(item) {
 }
 
 function rowStateClass(item) {
+  const nextUpdate = String(item.next_update || '').slice(0, 10);
+  const today = shanghaiDate();
   if (Number(item.node_status) === 0) return 'series-row-danger';
+  if (nextUpdate && nextUpdate < today) return 'series-row-stale';
   if (Number(item.total) > 0 && Number(item.episode_count) === Number(item.total)) return 'series-row-complete';
   if (Number(item.official_latest) > 0 && Number(item.local_latest) === Number(item.official_latest) && Number(item.episode_count) === Number(item.official_latest)) return 'series-row-caught-up';
-  if (String(item.next_update || '').slice(0, 10) === new Date().toISOString().slice(0, 10)) return 'series-row-today';
+  if (nextUpdate === today) return 'series-row-today';
   return '';
 }
 
