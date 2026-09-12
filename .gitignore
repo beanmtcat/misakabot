@@ -30,5 +30,6 @@ build/
 
 # Local service state and exported personal data
 local/
+docs/
 apps/emby-manager/path_map.txt
 apps/emby-manager/transfer_config.json
