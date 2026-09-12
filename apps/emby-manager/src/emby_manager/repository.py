@@ -778,22 +778,6 @@ class LegacyEmbyRepository:
                 (series_id, season_number),
             )
         server_latest = int(local["latest"]) if local and local["latest"] is not None else None
-        # TMDB's series-level ``last_episode_to_air`` can disagree with a season
-        # endpoint (for example after a provider renumbers or splits a season).
-        # Once this service has the actual season episode rows, they are the
-        # authoritative source for the "official aired" count shown in tracking.
-        if season_number is not None:
-            official = self._one(
-                '''SELECT COUNT(*) AS count FROM dragonli_tmdb_episodes
-                WHERE tid=%s AND season_number=%s AND isvalid=1
-                  AND air_date IS NOT NULL AND air_date <= CURRENT_DATE''',
-                (series_id, season_number),
-            )
-            if official and official["count"] is not None:
-                # TMDB seasons can use global episode numbering (for example
-                # long-running anime). The tracking UI needs an aired *count*,
-                # matching the legacy PHP cron task, not the largest episode ID.
-                official_latest = int(official["count"])
         self._write(
             '''UPDATE dragonli_emby_series SET
               season=%s,season_number=%s,server_latest=%s,official_latest=%s,next_update=%s,
@@ -838,6 +822,8 @@ class LegacyEmbyRepository:
             ))
         if not rows:
             return {"synced": 0, "skipped": skipped}
+        current_season = rows[0][3]
+        incoming_ids = [row[0] for row in rows]
         with closing(psycopg.connect(self._database_url, row_factory=dict_row)) as connection:
             with connection.transaction():
                 with connection.cursor() as cursor:
@@ -855,6 +841,15 @@ class LegacyEmbyRepository:
                           vote_count=EXCLUDED.vote_count,mtime=NOW(),isvalid=1''',
                         rows,
                     )
+                # Metadata providers occasionally correct a season's episode list.
+                # Keep the legacy rows for audit purposes, but exclude entries
+                # no longer returned by the current TMDB season response.
+                connection.execute(
+                    '''UPDATE dragonli_tmdb_episodes SET isvalid=0,mtime=NOW()
+                    WHERE tid=%s AND season_number=%s AND isvalid=1
+                      AND NOT (id = ANY(%s))''',
+                    (series_id, current_season, incoming_ids),
+                )
         return {"synced": len(rows), "skipped": skipped}
 
     def import_moviepilot_series(self, subscriptions: Mapping[str, str]) -> dict[str, int]:
