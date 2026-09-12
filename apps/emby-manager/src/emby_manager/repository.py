@@ -771,6 +771,19 @@ class LegacyEmbyRepository:
                 (series_id, season_number),
             )
         server_latest = int(local["latest"]) if local and local["latest"] is not None else None
+        # TMDB's series-level ``last_episode_to_air`` can disagree with a season
+        # endpoint (for example after a provider renumbers or splits a season).
+        # Once this service has the actual season episode rows, they are the
+        # authoritative source for the "official aired" count shown in tracking.
+        if season_number is not None:
+            official = self._one(
+                '''SELECT MAX(episode_number) AS latest FROM dragonli_tmdb_episodes
+                WHERE tid=%s AND season_number=%s AND isvalid=1
+                  AND air_date IS NOT NULL AND air_date <= CURRENT_DATE''',
+                (series_id, season_number),
+            )
+            if official and official["latest"] is not None:
+                official_latest = int(official["latest"])
         self._write(
             '''UPDATE dragonli_emby_series SET
               season=%s,season_number=%s,server_latest=%s,official_latest=%s,next_update=%s,

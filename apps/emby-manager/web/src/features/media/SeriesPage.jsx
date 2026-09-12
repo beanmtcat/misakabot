@@ -8,7 +8,7 @@ const PAGE_SIZE = 20;
 const blankDetail = { tracking: true, library_name: '', themoviedb: '', quark: '', alipan: '', alias: '', lock_season: '', index_name: '' };
 
 function updateState(item) {
-  if (item.server_latest || item.official_latest) return `本服 ${item.server_latest || 0} / 官方 ${item.official_latest || '—'}`;
+  if (item.server_latest || item.official_latest) return `本服 ${item.server_latest || 0} / 已播 ${item.official_latest || '—'}`;
   return item.update_time ? formatTime(item.update_time) : '暂无更新信息';
 }
 
@@ -167,7 +167,7 @@ export default function SeriesPage({ notify, archived = false }) {
   return <section className="page-section media-section">
     <div className="metric-grid"><article><span>{sectionName}</span><strong>{total}</strong><small>{archived ? '不会参与自动追更' : '已启用追更标记'}</small></article><article><span>今日更新</span><strong>{todayTotal}</strong><small>下次更新为今天</small></article><article><span>更新异常</span><strong>{exceptionTotal}</strong><small>本服与官方集数不一致</small></article></div>
     <Toolbar query={query} onQuery={(value) => { setQuery(value); setPage(1); }} filter={stateFilter} onFilter={(value) => { setStateFilter(value); setPage(1); }} filterOptions={archived ? [['', '全部已归档']] : [['', '全部追更'], ['today', '今日更新'], ['exception', '更新异常']]} onRefresh={load} onSync={!archived ? syncTracking : undefined} syncing={syncing} syncLabel={trackingEnabled || moviepilotEnabled ? '同步追更' : '同步剧集'} searchPlaceholder={`搜索${sectionName}电视剧`} />
-    <DataTable headers={['剧集', '节点 / 媒体库', '当前季', '本服 / TMDB', '更新日期', '操作']} empty={series.length === 0} loading={loading}>
+    <DataTable headers={['剧集', '节点 / 媒体库', '当前季', '本服 / 官方已播', '更新日期', '操作']} empty={series.length === 0} loading={loading}>
       {series.map((item) => <tr key={item.id} className={rowStateClass(item)}>
         <td>{Number(item.id) > 0 && item.server_id ? <a className="emby-item-link" href={embyItemUrl(item.id, item.server_id)} target="_blank" rel="noreferrer">{seriesTitle(item)}</a> : <strong>{seriesTitle(item)}</strong>}<small>{item.index_name || '—'} · ID {item.id}{item.themoviedb ? ` · TMDB ${item.themoviedb}` : ''}</small></td>
         <td><span className={`node-state ${item.node_status === 1 ? 'online' : ''}`}><i />{item.node_name}</span><small>{item.library_name}</small></td>
