@@ -15,3 +15,5 @@ cp compose.example.yaml compose.yaml
 ```
 
 实际 `compose.yaml`、`.env` 和运行态数据均已忽略，不会被提交到 GitHub。
+
+部署脚本同样分离：提交 [deploy.example.sh](deploy.example.sh)，本地复制为忽略的 `deploy.sh` 后通过环境变量传入主机、端口与私钥路径。
