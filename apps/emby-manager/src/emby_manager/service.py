@@ -367,7 +367,7 @@ def _tracking_snapshot(
             else:
                 upcoming.append(air_date)
         if aired:
-            official_latest = max(number for number, _ in aired)
+            official_latest = len(aired)
         if upcoming:
             next_update = min(upcoming).isoformat()
     return {
