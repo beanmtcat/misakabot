@@ -413,6 +413,28 @@ class LegacyEmbyRepository:
                 targets[tmdb_id] = library_name
         return targets
 
+    def tracked_series_cloud_path_targets(self) -> list[dict[str, object]]:
+        """Return tracked series with a manually supplied cloud source link.
+
+        ``quark`` and ``alipan`` are maintained by the operator on the existing
+        Dragonli tracking row.  Their presence means the title was supplied
+        manually and must be included in the transfer map even when MoviePilot
+        has no transfer-history record for it.
+        """
+        return self._all(
+            '''SELECT s.id::text AS id,s.name,s.alias,s.themoviedb,s.quark,s.alipan,
+                      l.name AS library_name
+               FROM dragonli_emby_series s
+               INNER JOIN dragonli_library_subfolders l ON l.seq=s.parent_id
+               WHERE s.isvalid=1 AND s."update" IS TRUE
+                 AND l.name IS NOT NULL AND btrim(l.name) <> ''
+                 AND (
+                    (s.quark IS NOT NULL AND btrim(s.quark) <> '')
+                    OR (s.alipan IS NOT NULL AND btrim(s.alipan) <> '')
+                 )
+               ORDER BY l.name,s.name,s.id'''
+        )
+
     def library_nodes(self) -> dict[str, str]:
         """Return the actual destination library's configured node, with legacy defaults."""
         rows = self._all(

@@ -67,27 +67,31 @@ class EmbyManagementService:
         return self._repository.list_libraries()
 
     async def series_path_entries_for_node(self, node_id: str) -> list[dict[str, str]]:
-        """Build node mappings from MoviePilot's final, scraped destination directories."""
+        """Build transfer mappings from MoviePilot and manually linked tracked series."""
         requested_node = self._repository.canonical_storage_node(node_id)
         if not requested_node:
             return []
         cached = self._series_path_cache.get(requested_node)
         if cached and monotonic() - cached[0] < _PATH_MAP_CACHE_SECONDS:
             return cached[1].copy()
-        if self._moviepilot_sqlite_path is None:
-            raise RuntimeError("MOVIEPILOT_SQLITE_PATH is not configured")
-
         targets = self._repository.tracked_series_path_targets()
-        if not targets:
+        cloud_targets = self._repository.tracked_series_cloud_path_targets()
+        if not targets and not cloud_targets:
             self._series_path_cache[requested_node] = (monotonic(), [])
             return []
         library_nodes = self._repository.library_nodes()
 
-        resolved = await asyncio.to_thread(
-            _latest_moviepilot_destinations, self._moviepilot_sqlite_path, targets,
-        )
+        resolved: dict[str, str] = {}
+        if targets:
+            if self._moviepilot_sqlite_path is None:
+                logger.warning("moviepilot_transfer_history_unavailable")
+            else:
+                resolved = await asyncio.to_thread(
+                    _latest_moviepilot_destinations, self._moviepilot_sqlite_path, targets,
+                )
 
         result: list[dict[str, str]] = []
+        mapping_keys: set[tuple[str, str]] = set()
         for tmdb_id, target_library in targets.items():
             match = resolved.get(tmdb_id)
             if match is None:
@@ -104,12 +108,36 @@ class EmbyManagementService:
             if target_node != requested_node:
                 continue
             target_directory = _replace_library_directory(source_directory, target_library)
-            result.append({
+            entry = {
                 "library_name": target_library,
                 "tmdb_id": tmdb_id,
                 "source_hint": f"{source_directory}/",
                 "destination_path": f"/data/media/tv/{target_directory}/",
-            })
+            }
+            result.append(entry)
+            mapping_keys.add((entry["source_hint"], entry["destination_path"]))
+
+        for target in cloud_targets:
+            target_library = _text(target.get("library_name"))
+            if _default_transfer_node(target_library) != requested_node:
+                continue
+            source_directory = _tracked_cloud_media_directory(target)
+            if source_directory is None:
+                logger.warning(
+                    "tracked_cloud_transfer_path_unusable series_id=%s name=%r alias=%r",
+                    target.get("id"), target.get("name"), target.get("alias"),
+                )
+                continue
+            entry = {
+                "library_name": target_library,
+                "tmdb_id": _text(target.get("themoviedb")),
+                "source_hint": f"{source_directory}/",
+                "destination_path": f"/data/media/tv/{source_directory}/",
+            }
+            key = (entry["source_hint"], entry["destination_path"])
+            if key not in mapping_keys:
+                result.append(entry)
+                mapping_keys.add(key)
         result.sort(key=lambda item: item["source_hint"])
         self._series_path_cache[requested_node] = (monotonic(), result)
         return result.copy()
@@ -460,6 +488,22 @@ def _replace_library_directory(source_directory: str, target_library: str) -> st
     """Keep MoviePilot's real scraped series folder while applying the manual library."""
     _, separator, remainder = source_directory.partition("/")
     return f"{target_library}/{remainder}" if separator else target_library
+
+
+def _tracked_cloud_media_directory(target: Mapping[str, object]) -> str | None:
+    """Build ``category/title (year)`` for a manually linked tracking row.
+
+    The title and scraped year are operator-maintained in the tracking table;
+    unlike the MoviePilot branch, no inferred title or category is involved.
+    """
+    library_name = _text(target.get("library_name"))
+    name = _text(target.get("name"))
+    year = _text(target.get("alias")).strip("() ")
+    if not library_name or not name or not _is_year(year):
+        return None
+    if any("/" in value or "|" in value for value in (library_name, name, year)):
+        return None
+    return f"{library_name}/{_title_with_year(name, year)}"
 
 
 def _default_transfer_node(library_name: str) -> str:
