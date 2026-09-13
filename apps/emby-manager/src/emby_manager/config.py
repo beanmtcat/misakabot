@@ -49,7 +49,7 @@ class Settings:
     tracking_sync_interval_seconds: int = 21600
     moviepilot_base_url: str = ""
     moviepilot_api_token: str = ""
-    moviepilot_sqlite_path: Path | None = None
+    moviepilot_database_url: str = ""
     moviepilot_sync_interval_seconds: int = 1800
     path_map_api_secret: str = ""
     manager_admin_usernames: frozenset[str] = frozenset()
@@ -74,6 +74,9 @@ class Settings:
         if not manager_admin_usernames:
             raise RuntimeError("EMBY_MANAGER_ADMIN_USERNAMES must contain at least one username")
         manager_origin = _origin(os.environ.get("EMBY_MANAGER_ORIGIN", ""))
+        moviepilot_database_url = os.environ.get("MOVIEPILOT_DATABASE_URL", "").strip()
+        if moviepilot_database_url and not moviepilot_database_url.startswith(("postgres://", "postgresql://")):
+            raise RuntimeError("MOVIEPILOT_DATABASE_URL must be a PostgreSQL URL")
         return cls(
             database_url=values["DATABASE_URL"],
             emby_base_url=values["EMBY_BASE_URL"],
@@ -101,13 +104,7 @@ class Settings:
             ),
             moviepilot_base_url=os.environ.get("MOVIEPILOT_BASE_URL", "").strip().rstrip("/"),
             moviepilot_api_token=os.environ.get("MOVIEPILOT_API_TOKEN", "").strip(),
-            moviepilot_sqlite_path=(
-                Path(configured_moviepilot_sqlite_path)
-                if (configured_moviepilot_sqlite_path := os.environ.get(
-                    "MOVIEPILOT_SQLITE_PATH", ""
-                ).strip())
-                else None
-            ),
+            moviepilot_database_url=moviepilot_database_url,
             moviepilot_sync_interval_seconds=_positive_seconds(
                 "MOVIEPILOT_SYNC_INTERVAL_SECONDS", 1800
             ),

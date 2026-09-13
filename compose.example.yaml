@@ -54,7 +54,7 @@ x-emby-service-environment: &emby-service-environment
   EMBY_TRACKING_SYNC_INTERVAL_SECONDS: "21600"
   MOVIEPILOT_BASE_URL: ${MOVIEPILOT_BASE_URL:?Set MOVIEPILOT_BASE_URL in .env}
   MOVIEPILOT_API_TOKEN: ${MOVIEPILOT_API_TOKEN:?Set MOVIEPILOT_API_TOKEN in .env}
-  MOVIEPILOT_SQLITE_PATH: /moviepilot-config/user.db
+  MOVIEPILOT_DATABASE_URL: ${MOVIEPILOT_DATABASE_URL:?Set MOVIEPILOT_DATABASE_URL in .env}
   MOVIEPILOT_SYNC_INTERVAL_SECONDS: "1800"
   EMBY_PATH_MAP_API_SECRET: ${EMBY_PATH_MAP_API_SECRET:?Set EMBY_PATH_MAP_API_SECRET in .env}
 
@@ -105,8 +105,6 @@ services:
     ports:
       - "127.0.0.1:8084:8084"
     restart: unless-stopped
-    volumes:
-      - /data/moviepilotv2/moviepilot:/moviepilot-config:ro
     profiles: ["emby"]
 
 networks:

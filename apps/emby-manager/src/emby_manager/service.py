@@ -5,11 +5,11 @@ from collections.abc import Mapping
 from datetime import date, datetime
 import logging
 from pathlib import PurePosixPath
-import sqlite3
 from time import monotonic
 from zoneinfo import ZoneInfo
 
 import httpx
+import psycopg
 
 from .auth import verify_password
 from .emby_client import EmbyClient, WatchSession, login_session_from_payload, watch_session_from_payload
@@ -30,13 +30,13 @@ class EmbyManagementService:
         client: EmbyClient,
         tmdb_client: TmdbClient | None = None,
         moviepilot_client: MoviePilotClient | None = None,
-        moviepilot_sqlite_path: Path | None = None,
+        moviepilot_database_url: str = "",
     ) -> None:
         self._repository = repository
         self._client = client
         self._tmdb_client = tmdb_client
         self._moviepilot_client = moviepilot_client
-        self._moviepilot_sqlite_path = moviepilot_sqlite_path
+        self._moviepilot_database_url = moviepilot_database_url
         self._series_path_cache: dict[str, tuple[float, list[dict[str, str]]]] = {}
 
     def authenticate(self, username: str, password: str) -> bool:
@@ -85,11 +85,11 @@ class EmbyManagementService:
 
         resolved: dict[str, str] = {}
         if targets:
-            if self._moviepilot_sqlite_path is None:
+            if not self._moviepilot_database_url:
                 logger.warning("moviepilot_transfer_history_unavailable")
             else:
                 resolved = await asyncio.to_thread(
-                    _latest_moviepilot_destinations, self._moviepilot_sqlite_path, targets,
+                    _latest_moviepilot_destinations, self._moviepilot_database_url, targets,
                 )
 
         result: list[dict[str, str]] = []
@@ -520,31 +520,26 @@ def _default_transfer_node(library_name: str) -> str:
 
 
 def _latest_moviepilot_destinations(
-    database_path: Path, targets: Mapping[str, str],
+    database_url: str, targets: Mapping[str, str],
 ) -> dict[str, str]:
-    """Read each tracked TMDB ID's latest successful destination from MoviePilot SQLite."""
-    if not database_path.is_file():
-        raise RuntimeError(f"MoviePilot SQLite database is unavailable: {database_path}")
+    """Read each tracked TMDB ID's latest successful destination from MoviePilot PostgreSQL."""
     tmdb_ids = sorted({
-        parsed for tmdb_id in targets
+        str(parsed) for tmdb_id in targets
         if (parsed := _positive_int(tmdb_id)) is not None
     })
     if not tmdb_ids:
         return {}
-    placeholders = ",".join("?" for _ in tmdb_ids)
-    query = f'''SELECT h.tmdbid,h.dest
-        FROM transferhistory h
-        INNER JOIN (
-          SELECT tmdbid,MAX(id) AS id FROM transferhistory
-          WHERE status=1 AND dest IS NOT NULL AND tmdbid IN ({placeholders})
-          GROUP BY tmdbid
-        ) latest ON latest.id=h.id'''
-    database_uri = f"{database_path.resolve().as_uri()}?mode=ro"
+    query = '''SELECT DISTINCT ON (tmdbid::text) tmdbid::text,dest
+        FROM transferhistory
+        WHERE status IS TRUE AND dest IS NOT NULL AND tmdbid::text = ANY(%s)
+        ORDER BY tmdbid::text,id DESC'''
     try:
-        with sqlite3.connect(database_uri, uri=True, timeout=5) as connection:
-            rows = connection.execute(query, tmdb_ids).fetchall()
-    except sqlite3.Error as error:
-        raise RuntimeError(f"MoviePilot SQLite query failed: {error}") from error
+        with psycopg.connect(database_url, connect_timeout=5) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(query, (tmdb_ids,))
+                rows = cursor.fetchall()
+    except psycopg.Error as error:
+        raise RuntimeError(f"MoviePilot PostgreSQL query failed: {error}") from error
     return {
         str(row[0]): destination
         for row in rows

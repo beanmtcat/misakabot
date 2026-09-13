@@ -54,6 +54,10 @@ Docker 镜像会自动使用 `/app/web/dist`。仅在非 Docker 部署且前端�
 任何实际 Emby 剧集记录。可通过 `MOVIEPILOT_SYNC_INTERVAL_SECONDS` 调整周期。
 服务使用 MoviePilot 的 `/api/v1/subscribe/` 订阅清单接口，并通过 `X-API-KEY` 请求头认证。
 
+已追更电视剧的路径映射会从 MoviePilot V3 PostgreSQL 的 `transferhistory` 读取最新成功整理记录；
+需要设置 `MOVIEPILOT_DATABASE_URL`。旧的 `MOVIEPILOT_SQLITE_PATH` 已不再使用，也不需要把
+MoviePilot 配置目录挂载进 Emby 服务。
+
 - `GET /emby-manager/`：管理后台；
 - `GET /emby-manager/v1/emby/users`：查询用户；
 - `POST /emby-manager/v1/emby/users/sync`：从 Emby 同步用户；
