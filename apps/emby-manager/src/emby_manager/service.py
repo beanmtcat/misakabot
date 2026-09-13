@@ -621,7 +621,7 @@ def _moviepilot_current_item(
             continue
         if candidate["media_id"] == source_item.get("media_id") and candidate["media_source"] == source_item.get("media_source"):
             continue
-        if not _moviepilot_titles_share_prefix(source_item.get("title", ""), candidate["title"]):
+        if not _moviepilot_titles_share_identity(source_item.get("title", ""), candidate["title"]):
             continue
         candidate_seasons = _moviepilot_seasoninfo(candidate["seasoninfo"])
         if not _moviepilot_has_strict_season_superset(source_seasons, candidate_seasons):
@@ -660,15 +660,26 @@ def _moviepilot_has_strict_season_superset(
     )
 
 
-def _moviepilot_titles_share_prefix(left: str, right: str) -> bool:
+def _moviepilot_titles_share_identity(left: str, right: str) -> bool:
     normalized_left = "".join(char for char in left.casefold() if char.isalnum())
     normalized_right = "".join(char for char in right.casefold() if char.isalnum())
-    prefix_length = 0
-    for left_char, right_char in zip(normalized_left, normalized_right):
-        if left_char != right_char:
-            break
-        prefix_length += 1
-    return prefix_length >= 4
+    if not normalized_left or not normalized_right:
+        return False
+    # A rescrape often inserts a qualifier into an established Chinese title,
+    # e.g. “中国说唱巅峰对决” and “中国新说唱”.  A common prefix would miss
+    # that relationship; an ordered common identifier remains specific enough
+    # when combined with the same-library strict season-episode coverage check.
+    previous = [0] * (len(normalized_right) + 1)
+    for left_char in normalized_left:
+        current = [0]
+        for index, right_char in enumerate(normalized_right, start=1):
+            current.append(
+                previous[index - 1] + 1
+                if left_char == right_char
+                else max(previous[index], current[-1])
+            )
+        previous = current
+    return previous[-1] >= 4
 
 
 def _moviepilot_destination_is_live(
