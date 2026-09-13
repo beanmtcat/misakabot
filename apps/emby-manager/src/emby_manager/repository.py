@@ -11,6 +11,9 @@ from psycopg.rows import dict_row
 from .emby_client import LoginSession, WatchSession
 
 
+_SHANGHAI_CURRENT_DATE = "(CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Shanghai')::date"
+
+
 class LegacyEmbyRepository:
     """Uses only the existing Dragonli Emby tables; this module intentionally contains no DDL."""
 
@@ -485,12 +488,12 @@ class LegacyEmbyRepository:
         if tracking is not None:
             clauses.append('s."update" IS TRUE' if tracking else 'COALESCE(s."update",FALSE) IS FALSE')
         if state == "today":
-            clauses.append("s.next_update=CURRENT_DATE")
+            clauses.append(f"s.next_update={_SHANGHAI_CURRENT_DATE}")
         elif state == "exception":
             clauses.append(
-                "(s.next_update IS NOT NULL AND s.next_update < CURRENT_DATE) OR "
+                f"(s.next_update IS NOT NULL AND s.next_update < {_SHANGHAI_CURRENT_DATE}) OR "
                 "(s.official_latest > 0 AND COALESCE(s.server_latest,0) != s.official_latest "
-                "AND (s.next_update IS NULL OR s.next_update != CURRENT_DATE))"
+                f"AND (s.next_update IS NULL OR s.next_update != {_SHANGHAI_CURRENT_DATE}))"
             )
         where = " AND ".join(clauses)
         total = self._one(f"SELECT COUNT(*) AS count FROM dragonli_emby_series s WHERE {where}", parameters)
@@ -498,10 +501,10 @@ class LegacyEmbyRepository:
             'SELECT COUNT(*) AS count FROM dragonli_emby_series WHERE isvalid=1 AND "update" IS TRUE'
         )
         following_counts = self._one(
-            '''SELECT COUNT(*) FILTER (WHERE next_update=CURRENT_DATE) AS today,
-            COUNT(*) FILTER (WHERE (next_update IS NOT NULL AND next_update < CURRENT_DATE) OR
+            f'''SELECT COUNT(*) FILTER (WHERE next_update={_SHANGHAI_CURRENT_DATE}) AS today,
+            COUNT(*) FILTER (WHERE (next_update IS NOT NULL AND next_update < {_SHANGHAI_CURRENT_DATE}) OR
               (official_latest > 0 AND COALESCE(server_latest,0) != official_latest
-              AND (next_update IS NULL OR next_update != CURRENT_DATE))) AS exception
+              AND (next_update IS NULL OR next_update != {_SHANGHAI_CURRENT_DATE}))) AS exception
             FROM dragonli_emby_series WHERE isvalid=1 AND "update" IS TRUE'''
         ) or {}
         pagination = "" if size is None else " LIMIT %s OFFSET %s"
@@ -801,9 +804,9 @@ class LegacyEmbyRepository:
             )
         server_latest = int(local["latest"]) if local and local["latest"] is not None else None
         self._write(
-            '''UPDATE dragonli_emby_series SET
+            f'''UPDATE dragonli_emby_series SET
               season=%s,season_number=%s,server_latest=%s,official_latest=%s,next_update=%s,
-              total=%s,update_time=CURRENT_DATE,mtime=NOW()
+              total=%s,update_time={_SHANGHAI_CURRENT_DATE},mtime=NOW()
               WHERE id=%s AND isvalid=1 AND "update" IS TRUE''',
             (
                 season_name,

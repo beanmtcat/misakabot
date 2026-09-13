@@ -2,11 +2,12 @@ from __future__ import annotations
 
 import asyncio
 from collections.abc import Mapping
-from datetime import date
+from datetime import date, datetime
 import logging
 from pathlib import PurePosixPath
 import sqlite3
 from time import monotonic
+from zoneinfo import ZoneInfo
 
 import httpx
 
@@ -19,6 +20,7 @@ from .tmdb_client import TmdbClient
 logger = logging.getLogger(__name__)
 
 _PATH_MAP_CACHE_SECONDS = 60
+_TRACKING_TIMEZONE = ZoneInfo("Asia/Shanghai")
 
 
 class EmbyManagementService:
@@ -350,6 +352,7 @@ class EmbyManagementService:
 def _tracking_snapshot(
     row: Mapping[str, object], details: Mapping[str, object], season_details: Mapping[str, object] | None = None,
 ) -> dict[str, object] | None:
+    today = datetime.now(_TRACKING_TIMEZONE).date()
     seasons = [item for item in details.get("seasons", []) if isinstance(item, Mapping)]
     non_special = [item for item in seasons if _positive_int(item.get("season_number")) not in (None, 0)]
     last = details.get("last_episode_to_air")
@@ -379,7 +382,7 @@ def _tracking_snapshot(
     next_update = (
         next_air_date.isoformat()
         if _positive_int(upcoming_episode.get("season_number")) == season_number
-        and next_air_date is not None and next_air_date >= date.today()
+        and next_air_date is not None and next_air_date >= today
         else None
     )
     if isinstance(season_details, Mapping):
@@ -392,9 +395,9 @@ def _tracking_snapshot(
             air_date = _date_value(episode.get("air_date"))
             if episode_number is None or air_date is None:
                 continue
-            if air_date <= date.today():
+            if air_date <= today:
                 aired.append((episode_number, air_date))
-            if air_date >= date.today():
+            if air_date >= today:
                 scheduled.append(air_date)
         if aired:
             official_latest = len(aired)
