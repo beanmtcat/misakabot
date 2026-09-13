@@ -130,7 +130,7 @@ class EmbyManagementService:
                 continue
             source_location = _moviepilot_media_directory(destination, library_nodes)
             target_location = _moviepilot_media_directory(
-                moviepilot_entry["target_path"], library_nodes,
+                moviepilot_entry["target_path"], library_nodes, is_directory=True,
             )
             if source_location is None or target_location is None:
                 continue
@@ -474,21 +474,23 @@ def _moviepilot_title(payload: Mapping[str, object], tmdb_id: str) -> str:
 
 
 def _moviepilot_media_directory(
-    destination: str, library_nodes: Mapping[str, str],
+    destination: str, library_nodes: Mapping[str, str], *, is_directory: bool = False,
 ) -> tuple[str, str] | None:
     """Extract ``library/series directory`` from a MoviePilot transfer destination.
 
-    A transfer destination is an absolute path inside MoviePilot's storage, e.g.
+    A transfer destination is an absolute file path inside MoviePilot's storage, e.g.
     ``/mnt/share/media1/media/综艺/姐姐快醒醒 (2026)/S01E06.mkv``. The configured
     library segment is taken from the real MoviePilot destination; this intentionally
     avoids guessing from the transfer title or from Emby's scraped title/category.
+    ``mediaserveritem.path`` is already a series-directory path, so it must
+    retain its last component instead of being handled like a video file.
     """
     parts = PurePosixPath(destination).parts
     indexes = [index for index, value in enumerate(parts) if value in library_nodes]
     if not indexes or len(parts) < 3:
         return None
     for index in reversed(indexes):
-        directory_parts = parts[index:-1]
+        directory_parts = parts[index:] if is_directory else parts[index:-1]
         if len(directory_parts) < 2:
             continue
         if any(part in {"", ".", "..", "/"} for part in directory_parts):

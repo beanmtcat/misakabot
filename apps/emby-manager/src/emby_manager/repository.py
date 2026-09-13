@@ -423,17 +423,15 @@ class LegacyEmbyRepository:
     def series_cloud_path_targets(self) -> list[dict[str, object]]:
         """Return series with a manually supplied cloud source link.
 
-        ``quark`` and ``alipan`` are maintained by the operator on the existing
-        Dragonli series row. Their presence is an explicit operator instruction
-        to include the title in the transfer map, independent of tracking state
-        or MoviePilot transfer history.
+        ``quark`` and ``alipan`` are maintained by the operator on an active
+        tracking row. Archived records must never create transfer mappings.
         """
         return self._all(
             '''SELECT s.id::text AS id,s.name,s.alias,s.themoviedb,s.quark,s.alipan,
                       l.name AS library_name
                FROM dragonli_emby_series s
                INNER JOIN dragonli_library_subfolders l ON l.seq=s.parent_id
-               WHERE s.isvalid=1
+               WHERE s.isvalid=1 AND s."update" IS TRUE
                  AND l.name IS NOT NULL AND btrim(l.name) <> ''
                  AND (
                     (s.quark IS NOT NULL AND btrim(s.quark) <> '')
