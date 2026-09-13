@@ -563,16 +563,33 @@ class LegacyEmbyRepository:
         )
 
     def update_series_detail(self, series_id: int, detail: Mapping[str, object]) -> bool:
-        if self.series_detail(series_id) is None:
+        current_library = self._one(
+            '''SELECT s.parent_id,l.name AS library_name,l.node_id
+            FROM dragonli_emby_series s
+            LEFT JOIN dragonli_library_subfolders l ON l.seq=s.parent_id
+            WHERE s.id=%s AND s.isvalid=1''',
+            (series_id,),
+        )
+        if current_library is None:
             return False
         library_name = _nullable(detail.get("library_name"))
-        target_library = self._one(
-            '''SELECT seq FROM dragonli_library_subfolders
-            WHERE name=%s ORDER BY seq LIMIT 1''', (library_name,)
-        ) if library_name else None
-        if library_name and target_library is None:
-            return False
-        library_id = int(target_library["seq"]) if target_library is not None else None
+        current_library_name = _nullable(current_library.get("library_name"))
+
+        # Library category names are intentionally shared by multiple storage nodes.
+        # A settings save with an unchanged category must keep the exact parent_id;
+        # resolving it again by name could silently move the series to another node.
+        library_id: int | None = None
+        if library_name and library_name != current_library_name:
+            target_library = self._one(
+                '''SELECT seq FROM dragonli_library_subfolders
+                WHERE name=%s
+                ORDER BY CASE WHEN node_id=%s THEN 0 ELSE 1 END,seq
+                LIMIT 1''',
+                (library_name, current_library.get("node_id")),
+            )
+            if target_library is None:
+                return False
+            library_id = int(target_library["seq"])
         self._write(
             '''UPDATE dragonli_emby_series SET "update"=%s,themoviedb=%s,quark=%s,alipan=%s,alias=%s,
             lock_season=%s,index_name=%s,parent_id=COALESCE(%s,parent_id),mtime=NOW() WHERE id=%s AND isvalid=1''',
