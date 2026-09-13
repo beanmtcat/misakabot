@@ -1,7 +1,0 @@
-# Confirmed historical media-folder aliases.  Keep this file with
-# auto_transfer.py; local path_map.overrides.txt entries take precedence.
-欧美剧集/母狮 (2023)/|/data/media/tv/欧美剧集/特别行动：母狮 (2023)/
-日韩剧集/好，我们离婚吧 (2026)/|/data/media/tv/日韩剧集/好吧离婚吧 (2026)/
-华语剧集/我的千岁大人 (2026)/|/data/media/tv/华语剧集/驸马小仵作 (2026)/
-华语剧集/飞到我心上 (2026)/|/data/media/tv/华语剧集/降落我心上 (2026)/
-综艺/中国说唱巅峰对决 (2022)/|/data/media/tv/综艺/中国新说唱 (2017)/

@@ -20,7 +20,6 @@ from urllib.request import Request, urlopen
 CONFIG_PATH = "/data/media/transfer_config.json"
 LOG_PATH = "/data/media/auto_transfer.log"
 LOCK_PATH = "/tmp/auto_transfer.lock"
-PACKAGED_MAPPING_OVERRIDES = Path(__file__).with_name("path_map.overrides.txt")
 
 
 def log(msg: str):
@@ -252,54 +251,8 @@ def write_mapping_file(path: Path, mappings: list[tuple[str, str]]) -> None:
     os.replace(temporary_path, path)
 
 
-def differs_from_default_destination(src_root: str, dst_root: str) -> bool:
-    """Whether a legacy mapping intentionally redirects into another directory."""
-    normalized_target = dst_root.rstrip("/")
-    return normalized_target != f"/data/media/tv/{src_root.strip('/')}"
-
-
-def mapping_override_file(cfg: dict, mapping_file: str) -> Path:
-    configured = str(cfg.get("mapping_overrides_file") or "").strip()
-    if configured:
-        return Path(configured)
-    target = Path(mapping_file)
-    return target.with_name(f"{target.stem}.overrides{target.suffix}")
-
-
-def load_or_migrate_mapping_overrides(cfg: dict, mapping_file: str) -> list[tuple[str, str]]:
-    """Keep operator-maintained directory aliases across remote map refreshes.
-
-    Older deployments stored aliases in ``path_map.txt`` itself. On the first
-    refresh, migrate only entries whose destination differs from the default
-    ``/data/media/tv/<source>`` layout into a separate, durable override file.
-    """
-    override_file = mapping_override_file(cfg, mapping_file)
-    # A small packaged baseline restores confirmed historical folder aliases
-    # after an old dynamic refresh has already overwritten path_map.txt.  The
-    # local file always wins, so operators can replace or add aliases safely.
-    merged: dict[str, str] = {}
-    if PACKAGED_MAPPING_OVERRIDES.exists():
-        merged.update(load_mapping_file(str(PACKAGED_MAPPING_OVERRIDES)))
-    if os.path.exists(mapping_file):
-        legacy_overrides = [
-        (src_root, dst_root)
-        for src_root, dst_root in load_mapping_file(mapping_file)
-        if differs_from_default_destination(src_root, dst_root)
-        ]
-        merged.update(legacy_overrides)
-    if override_file.exists():
-        merged.update(load_mapping_file(str(override_file)))
-
-    overrides = list(merged.items())
-    existing = load_mapping_file(str(override_file)) if override_file.exists() else []
-    if overrides != existing:
-        write_mapping_file(override_file, overrides)
-        log(f"Stored {len(overrides)} manual mapping overrides in {override_file}")
-    return overrides
-
-
 def refresh_mapping_file(cfg: dict, mapping_file: str) -> None:
-    """Fetch an HMAC-authenticated map while preserving manual directory aliases."""
+    """Fetch an HMAC-authenticated mapping from MoviePilot and Emby metadata."""
     api = cfg.get("path_map_api")
     if not isinstance(api, dict):
         return
@@ -359,17 +312,8 @@ def refresh_mapping_file(cfg: dict, mapping_file: str) -> None:
         if src_root and dst_root:
             remote_mappings.append((src_root, dst_root))
 
-    overrides = load_or_migrate_mapping_overrides(cfg, mapping_file)
-    override_sources = {src_root for src_root, _ in overrides}
-    merged_mappings = [
-        mapping for mapping in remote_mappings if mapping[0] not in override_sources
-    ]
-    merged_mappings.extend(overrides)
-    write_mapping_file(Path(mapping_file), merged_mappings)
-    log(
-        f"Refreshed mapping file from node {node_id}: {len(merged_mappings)} entries "
-        f"({len(overrides)} manual overrides)"
-    )
+    write_mapping_file(Path(mapping_file), remote_mappings)
+    log(f"Refreshed mapping file from node {node_id}: {len(remote_mappings)} entries")
 
 
 def parse_args():

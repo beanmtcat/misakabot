@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Mapping
 from datetime import date, datetime
+import json
 import logging
 from pathlib import Path, PurePosixPath
 from time import monotonic
@@ -81,20 +82,18 @@ class EmbyManagementService:
         cached = self._series_path_cache.get(requested_node)
         if cached and monotonic() - cached[0] < _PATH_MAP_CACHE_SECONDS:
             return cached[1].copy()
-        targets = self._repository.series_path_targets()
         cloud_targets = self._repository.series_cloud_path_targets()
-        if not targets and not cloud_targets:
+        if not cloud_targets and not self._moviepilot_database_url:
             self._series_path_cache[requested_node] = (monotonic(), [])
             return []
         library_nodes = self._repository.library_nodes()
 
-        resolved: dict[str, str] = {}
+        moviepilot_entries: list[dict[str, str]] = []
         if self._moviepilot_database_url and self._moviepilot_media_path_mappings:
-            if targets:
-                resolved = await asyncio.to_thread(
-                    _latest_moviepilot_destinations, self._moviepilot_database_url, targets,
-                )
-        elif targets:
+            moviepilot_entries = await asyncio.to_thread(
+                _moviepilot_transfer_path_entries, self._moviepilot_database_url,
+            )
+        elif self._moviepilot_database_url:
             logger.warning("moviepilot_transfer_history_unavailable")
 
         result: list[dict[str, str]] = []
@@ -123,22 +122,20 @@ class EmbyManagementService:
                 mapping_keys.add(key)
                 mapped_sources.add(entry["source_hint"])
 
-        for tmdb_id, target in targets.items():
-            destination = resolved.get(tmdb_id)
-            if not destination:
-                continue
+        for moviepilot_entry in moviepilot_entries:
+            destination = moviepilot_entry["source_destination"]
             if not _moviepilot_destination_is_live(
                 destination, self._moviepilot_media_path_mappings,
             ):
                 continue
-            location = _moviepilot_media_directory(destination, library_nodes)
-            if location is None:
+            source_location = _moviepilot_media_directory(destination, library_nodes)
+            target_location = _moviepilot_media_directory(
+                moviepilot_entry["target_path"], library_nodes,
+            )
+            if source_location is None or target_location is None:
                 continue
-            _, source_directory = location
-            target_directory = _tracked_cloud_media_directory(target)
-            if target_directory is None:
-                continue
-            target_library = _text(target.get("library_name"))
+            _, source_directory = source_location
+            target_library, target_directory = target_location
             target_node = _default_transfer_node(target_library)
             if target_node != requested_node:
                 continue
@@ -147,7 +144,7 @@ class EmbyManagementService:
                 continue
             entry = {
                 "library_name": target_library,
-                "tmdb_id": tmdb_id,
+                "tmdb_id": moviepilot_entry["media_id"],
                 "source_hint": source_hint,
                 "destination_path": f"/data/media/tv/{target_directory}/",
             }
@@ -527,39 +524,148 @@ def _default_transfer_node(library_name: str) -> str:
     return "emby2" if library_name.startswith("动漫集") else "emby0"
 
 
-def _latest_moviepilot_destinations(
-    database_url: str, targets: Mapping[str, str],
-) -> dict[str, str]:
-    """Read direct-TMDB transfers from MoviePilot V3 PostgreSQL.
+def _moviepilot_transfer_path_entries(database_url: str) -> list[dict[str, str]]:
+    """Map an organized MoviePilot directory to its current Emby item directory.
 
-    V3 stores the source-native media identity rather than a separate ``tmdbid``.
-    A Douban/Bangumi identity cannot be safely treated as a TMDB identifier here.
+    ``transferhistory.dest`` is the stable left-hand directory for auto-transfer.
+    MoviePilot's media-server index is the authority for the current scraped
+    right-hand directory.  This deliberately does not use Dragonli's copied
+    TMDB field: a rescrape can replace that identifier while the media-server
+    item still retains the real directory relationship.
     """
-    tmdb_ids = sorted({
-        str(parsed) for tmdb_id in targets
-        if (parsed := _positive_int(tmdb_id)) is not None
-    })
-    if not tmdb_ids:
-        return {}
-    query = '''SELECT DISTINCT ON (media_id) media_id,dest
+    transfer_query = '''SELECT DISTINCT ON (category,title,year,media_source,media_id)
+            dest,media_source,media_id
         FROM transferhistory
         WHERE status IS TRUE AND dest IS NOT NULL
           AND type='电视剧'
-          AND lower(media_source) IN ('tmdb', 'themoviedb')
-          AND media_id = ANY(%s)
-        ORDER BY media_id,id DESC'''
+        ORDER BY category,title,year,media_source,media_id,id DESC'''
+    item_query = '''SELECT server,library,title,media_source,media_id,path,seasoninfo
+        FROM mediaserveritem
+        WHERE path IS NOT NULL AND btrim(path) <> ''
+          AND lower(server)='emby'
+        ORDER BY lst_mod_date DESC NULLS LAST,id DESC'''
     try:
         with psycopg.connect(database_url, connect_timeout=5) as connection:
             with connection.cursor() as cursor:
-                cursor.execute(query, (tmdb_ids,))
-                rows = cursor.fetchall()
+                cursor.execute(transfer_query)
+                transfers = cursor.fetchall()
+                cursor.execute(item_query)
+                items = cursor.fetchall()
     except psycopg.Error as error:
         raise RuntimeError(f"MoviePilot PostgreSQL query failed: {error}") from error
-    return {
-        str(row[0]): destination
-        for row in rows
-        if (destination := _text(row[1]))
-    }
+
+    indexed_items: list[dict[str, str]] = []
+    by_identity: dict[tuple[str, str], dict[str, str]] = {}
+    for server, library, title, source, media_id, path, seasoninfo in items:
+        entry = {
+            "server": _text(server),
+            "library": _text(library),
+            "title": _text(title),
+            "media_source": _moviepilot_source_key(_text(source)),
+            "media_id": _text(media_id),
+            "path": _text(path),
+            "seasoninfo": _text(seasoninfo),
+        }
+        if not entry["library"] or not entry["title"] or not entry["path"]:
+            continue
+        indexed_items.append(entry)
+        identity = (entry["media_source"], entry["media_id"])
+        by_identity.setdefault(identity, entry)
+
+    result: list[dict[str, str]] = []
+    for destination, source, media_id in transfers:
+        normalized_source = _moviepilot_source_key(_text(source))
+        normalized_media_id = _text(media_id)
+        source_item = by_identity.get((normalized_source, normalized_media_id))
+        if source_item is None:
+            continue
+        target_item = _moviepilot_current_item(source_item, indexed_items)
+        if target_item is None:
+            continue
+        organized_destination = _text(destination)
+        if organized_destination:
+            result.append({
+                "source_destination": organized_destination,
+                "target_path": target_item["path"],
+                "media_id": normalized_media_id,
+            })
+    return result
+
+
+def _moviepilot_source_key(value: str) -> str:
+    normalized = value.casefold()
+    return "tmdb" if normalized in {"tmdb", "themoviedb"} else normalized
+
+
+def _moviepilot_current_item(
+    source_item: Mapping[str, str], items: list[dict[str, str]],
+) -> dict[str, str] | None:
+    """Resolve a verified replacement item when MoviePilot has split a season.
+
+    The direct media identity remains the default.  A different item is used
+    only when it is in the same Emby library, its same-season episode set is a
+    strict superset, and the titles share a meaningful leading identifier.  It
+    covers cases such as a season being rescraped as a standalone title without
+    turning unrelated shows into directory aliases.
+    """
+    source_seasons = _moviepilot_seasoninfo(source_item.get("seasoninfo", ""))
+    best_item: dict[str, str] | None = None
+    best_coverage = 0
+    for candidate in items:
+        if candidate["library"] != source_item.get("library"):
+            continue
+        if candidate["server"] != source_item.get("server"):
+            continue
+        if candidate["media_id"] == source_item.get("media_id") and candidate["media_source"] == source_item.get("media_source"):
+            continue
+        if not _moviepilot_titles_share_prefix(source_item.get("title", ""), candidate["title"]):
+            continue
+        candidate_seasons = _moviepilot_seasoninfo(candidate["seasoninfo"])
+        if not _moviepilot_has_strict_season_superset(source_seasons, candidate_seasons):
+            continue
+        coverage = sum(len(episodes) for episodes in candidate_seasons.values())
+        if coverage > best_coverage:
+            best_item = candidate
+            best_coverage = coverage
+    return best_item or dict(source_item)
+
+
+def _moviepilot_seasoninfo(value: str) -> dict[int, set[int]]:
+    try:
+        payload = json.loads(value)
+    except (TypeError, ValueError, json.JSONDecodeError):
+        return {}
+    if not isinstance(payload, dict):
+        return {}
+    result: dict[int, set[int]] = {}
+    for raw_season, raw_episodes in payload.items():
+        season = _positive_int(raw_season)
+        if season is None or not isinstance(raw_episodes, list):
+            continue
+        episodes = {episode for raw in raw_episodes if (episode := _positive_int(raw)) is not None}
+        if episodes:
+            result[season] = episodes
+    return result
+
+
+def _moviepilot_has_strict_season_superset(
+    source: Mapping[int, set[int]], candidate: Mapping[int, set[int]],
+) -> bool:
+    return any(
+        source_episodes < candidate.get(season, set())
+        for season, source_episodes in source.items()
+    )
+
+
+def _moviepilot_titles_share_prefix(left: str, right: str) -> bool:
+    normalized_left = "".join(char for char in left.casefold() if char.isalnum())
+    normalized_right = "".join(char for char in right.casefold() if char.isalnum())
+    prefix_length = 0
+    for left_char, right_char in zip(normalized_left, normalized_right):
+        if left_char != right_char:
+            break
+        prefix_length += 1
+    return prefix_length >= 4
 
 
 def _moviepilot_destination_is_live(
