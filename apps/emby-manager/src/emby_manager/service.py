@@ -564,7 +564,10 @@ def _moviepilot_transfer_path_entries(database_url: str) -> list[dict[str, str]]
             "media_source": _moviepilot_source_key(_text(source)),
             "media_id": _text(media_id),
             "path": _text(path),
-            "seasoninfo": _text(seasoninfo),
+            # psycopg decodes JSON/JSONB columns into a mapping.  Re-encode it
+            # so the season parser handles PostgreSQL and text-backed schemas
+            # identically.
+            "seasoninfo": json.dumps(seasoninfo) if isinstance(seasoninfo, Mapping) else _text(seasoninfo),
         }
         if not entry["library"] or not entry["title"] or not entry["path"]:
             continue
