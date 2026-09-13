@@ -20,6 +20,7 @@ from urllib.request import Request, urlopen
 CONFIG_PATH = "/data/media/transfer_config.json"
 LOG_PATH = "/data/media/auto_transfer.log"
 LOCK_PATH = "/tmp/auto_transfer.lock"
+PACKAGED_MAPPING_OVERRIDES = Path(__file__).with_name("path_map.overrides.txt")
 
 
 def log(msg: str):
@@ -242,7 +243,7 @@ def load_mapping_file(path: str):
 def write_mapping_file(path: Path, mappings: list[tuple[str, str]]) -> None:
     """Atomically persist normalized mapping pairs."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    lines = [f"{src_root.rstrip('/') }|{dst_root.rstrip('/')}" for src_root, dst_root in mappings]
+    lines = [f"{src_root.rstrip('/')}|{dst_root.rstrip('/')}" for src_root, dst_root in mappings]
     with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=path.parent, delete=False) as handle:
         handle.write("\n".join(lines))
         if lines:
@@ -273,18 +274,27 @@ def load_or_migrate_mapping_overrides(cfg: dict, mapping_file: str) -> list[tupl
     ``/data/media/tv/<source>`` layout into a separate, durable override file.
     """
     override_file = mapping_override_file(cfg, mapping_file)
-    if override_file.exists():
-        return load_mapping_file(str(override_file))
-    if not os.path.exists(mapping_file):
-        return []
-    overrides = [
+    # A small packaged baseline restores confirmed historical folder aliases
+    # after an old dynamic refresh has already overwritten path_map.txt.  The
+    # local file always wins, so operators can replace or add aliases safely.
+    merged: dict[str, str] = {}
+    if PACKAGED_MAPPING_OVERRIDES.exists():
+        merged.update(load_mapping_file(str(PACKAGED_MAPPING_OVERRIDES)))
+    if os.path.exists(mapping_file):
+        legacy_overrides = [
         (src_root, dst_root)
         for src_root, dst_root in load_mapping_file(mapping_file)
         if differs_from_default_destination(src_root, dst_root)
-    ]
-    if overrides:
+        ]
+        merged.update(legacy_overrides)
+    if override_file.exists():
+        merged.update(load_mapping_file(str(override_file)))
+
+    overrides = list(merged.items())
+    existing = load_mapping_file(str(override_file)) if override_file.exists() else []
+    if overrides != existing:
         write_mapping_file(override_file, overrides)
-        log(f"Migrated {len(overrides)} manual mapping overrides to {override_file}")
+        log(f"Stored {len(overrides)} manual mapping overrides in {override_file}")
     return overrides
 
 
