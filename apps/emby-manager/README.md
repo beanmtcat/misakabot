@@ -56,7 +56,9 @@ Docker 镜像会自动使用 `/app/web/dist`。仅在非 Docker 部署且前端�
 
 已追更电视剧的路径映射会从 MoviePilot V3 PostgreSQL 的 `transferhistory` 读取最新成功整理记录；
 需要设置 `MOVIEPILOT_DATABASE_URL`。旧的 `MOVIEPILOT_SQLITE_PATH` 已不再使用，也不需要把
-MoviePilot 配置目录挂载进 Emby 服务。
+MoviePilot 配置目录挂载进 Emby 服务。若要将不在订阅内的一次性剧集也加入映射，应只读挂载
+MoviePilot 的媒体整理输出目录，并设置 `MOVIEPILOT_MEDIA_PATH_MAPPINGS`。服务会用该挂载确认
+整理历史的目标视频仍存在；文件被转存后删除时，旧历史不会再出现在映射中。
 
 - `GET /emby-manager/`：管理后台；
 - `GET /emby-manager/v1/emby/users`：查询用户；

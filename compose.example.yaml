@@ -55,6 +55,7 @@ x-emby-service-environment: &emby-service-environment
   MOVIEPILOT_BASE_URL: ${MOVIEPILOT_BASE_URL:?Set MOVIEPILOT_BASE_URL in .env}
   MOVIEPILOT_API_TOKEN: ${MOVIEPILOT_API_TOKEN:?Set MOVIEPILOT_API_TOKEN in .env}
   MOVIEPILOT_DATABASE_URL: ${MOVIEPILOT_DATABASE_URL:?Set MOVIEPILOT_DATABASE_URL in .env}
+  MOVIEPILOT_MEDIA_PATH_MAPPINGS: ${MOVIEPILOT_MEDIA_PATH_MAPPINGS:-}
   MOVIEPILOT_SYNC_INTERVAL_SECONDS: "1800"
   EMBY_PATH_MAP_API_SECRET: ${EMBY_PATH_MAP_API_SECRET:?Set EMBY_PATH_MAP_API_SECRET in .env}
 
@@ -104,6 +105,9 @@ services:
     environment: *emby-service-environment
     ports:
       - "127.0.0.1:8084:8084"
+    volumes:
+      # The MoviePilot organized-media directory; required only for live one-off transfer mappings.
+      - ${MOVIEPILOT_MEDIA_ORGANIZE_DIR:?Set MOVIEPILOT_MEDIA_ORGANIZE_DIR in .env}:/moviepilot-media:ro
     restart: unless-stopped
     profiles: ["emby"]
 

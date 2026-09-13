@@ -163,6 +163,7 @@ def create_app(
             settings.request_timeout_seconds,
         ) if settings.moviepilot_base_url and settings.moviepilot_api_token else None,
         settings.moviepilot_database_url,
+        settings.moviepilot_media_path_mappings,
     )
     sync_lock = asyncio.Lock()
     session_registry = SessionRegistry(86400)

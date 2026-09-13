@@ -4,7 +4,7 @@ import asyncio
 from collections.abc import Mapping
 from datetime import date, datetime
 import logging
-from pathlib import PurePosixPath
+from pathlib import Path, PurePosixPath
 from time import monotonic
 from zoneinfo import ZoneInfo
 
@@ -21,6 +21,9 @@ logger = logging.getLogger(__name__)
 
 _PATH_MAP_CACHE_SECONDS = 60
 _TRACKING_TIMEZONE = ZoneInfo("Asia/Shanghai")
+_VIDEO_SUFFIXES = frozenset({
+    ".3gp", ".asf", ".avi", ".flv", ".m2ts", ".m4v", ".mkv", ".mov", ".mp4", ".mpeg", ".mpg", ".rmvb", ".ts", ".webm", ".wmv",
+})
 
 
 class EmbyManagementService:
@@ -31,12 +34,14 @@ class EmbyManagementService:
         tmdb_client: TmdbClient | None = None,
         moviepilot_client: MoviePilotClient | None = None,
         moviepilot_database_url: str = "",
+        moviepilot_media_path_mappings: tuple[tuple[str, Path], ...] = (),
     ) -> None:
         self._repository = repository
         self._client = client
         self._tmdb_client = tmdb_client
         self._moviepilot_client = moviepilot_client
         self._moviepilot_database_url = moviepilot_database_url
+        self._moviepilot_media_path_mappings = moviepilot_media_path_mappings
         self._series_path_cache: dict[str, tuple[float, list[dict[str, str]]]] = {}
 
     def authenticate(self, username: str, password: str) -> bool:
@@ -78,22 +83,31 @@ class EmbyManagementService:
             return cached[1].copy()
         targets = self._repository.tracked_series_path_targets()
         cloud_targets = self._repository.tracked_series_cloud_path_targets()
-        if not targets and not cloud_targets:
+        if not targets and not cloud_targets and not self._moviepilot_media_path_mappings:
             self._series_path_cache[requested_node] = (monotonic(), [])
             return []
         library_nodes = self._repository.library_nodes()
+        series_library_names = {
+            _text(library.get("name")) for library in self._repository.list_libraries()
+        }
 
         resolved: dict[str, str] = {}
-        if targets:
-            if not self._moviepilot_database_url:
-                logger.warning("moviepilot_transfer_history_unavailable")
-            else:
+        live_destinations: list[str] = []
+        if self._moviepilot_database_url:
+            if targets:
                 resolved = await asyncio.to_thread(
                     _latest_moviepilot_destinations, self._moviepilot_database_url, targets,
                 )
+            if self._moviepilot_media_path_mappings:
+                live_destinations = await asyncio.to_thread(
+                    _live_moviepilot_transfer_destinations, self._moviepilot_database_url,
+                )
+        elif targets or self._moviepilot_media_path_mappings:
+            logger.warning("moviepilot_transfer_history_unavailable")
 
         result: list[dict[str, str]] = []
         mapping_keys: set[tuple[str, str]] = set()
+        mapped_sources: set[str] = set()
         for tmdb_id, target_library in targets.items():
             match = resolved.get(tmdb_id)
             if match is None:
@@ -102,7 +116,7 @@ class EmbyManagementService:
             if location is None:
                 logger.warning(
                     "moviepilot_transfer_path_unusable tmdb_id=%s destination=%r",
-                    tmdb_id, match[1],
+                    tmdb_id, match,
                 )
                 continue
             _, source_directory = location
@@ -118,6 +132,7 @@ class EmbyManagementService:
             }
             result.append(entry)
             mapping_keys.add((entry["source_hint"], entry["destination_path"]))
+            mapped_sources.add(entry["source_hint"])
 
         for target in cloud_targets:
             target_library = _text(target.get("library_name"))
@@ -140,6 +155,38 @@ class EmbyManagementService:
             if key not in mapping_keys:
                 result.append(entry)
                 mapping_keys.add(key)
+                mapped_sources.add(entry["source_hint"])
+
+        # One-off manual downloads have no subscription/tracking row.  The transfer
+        # history supplies their organized destination, but history is not truth: a
+        # row is emitted only while its exact video file still exists in the
+        # read-only MoviePilot media mount.
+        for destination in live_destinations:
+            if not _moviepilot_destination_is_live(
+                destination, self._moviepilot_media_path_mappings,
+            ):
+                continue
+            location = _moviepilot_media_directory(destination, library_nodes)
+            if location is None:
+                continue
+            target_library, source_directory = location
+            if target_library not in series_library_names:
+                continue
+            target_node = _default_transfer_node(target_library)
+            if target_node != requested_node:
+                continue
+            source_hint = f"{source_directory}/"
+            if source_hint in mapped_sources:
+                continue
+            entry = {
+                "library_name": target_library,
+                "tmdb_id": "",
+                "source_hint": source_hint,
+                "destination_path": f"/data/media/tv/{source_directory}/",
+            }
+            result.append(entry)
+            mapping_keys.add((entry["source_hint"], entry["destination_path"]))
+            mapped_sources.add(source_hint)
         result.sort(key=lambda item: item["source_hint"])
         self._series_path_cache[requested_node] = (monotonic(), result)
         return result.copy()
@@ -551,6 +598,43 @@ def _latest_moviepilot_destinations(
         for row in rows
         if (destination := _text(row[1]))
     }
+
+
+def _live_moviepilot_transfer_destinations(database_url: str) -> list[str]:
+    """Return distinct successful transfer targets without treating history as live state."""
+    query = '''SELECT DISTINCT ON (dest) dest
+        FROM transferhistory
+        WHERE status IS TRUE AND dest IS NOT NULL AND btrim(dest) <> ''
+        ORDER BY dest,id DESC'''
+    try:
+        with psycopg.connect(database_url, connect_timeout=5) as connection:
+            with connection.cursor() as cursor:
+                cursor.execute(query)
+                rows = cursor.fetchall()
+    except psycopg.Error as error:
+        raise RuntimeError(f"MoviePilot PostgreSQL query failed: {error}") from error
+    return [destination for row in rows if (destination := _text(row[0]))]
+
+
+def _moviepilot_destination_is_live(
+    destination: str, path_mappings: tuple[tuple[str, Path], ...],
+) -> bool:
+    """Check the exact organized video through a read-only local mount.
+
+    MoviePilot keeps transfer-history rows even after an operator deletes the
+    organized source.  Only a present video file represents a pending handoff.
+    """
+    remote_path = PurePosixPath(destination)
+    for moviepilot_root, mounted_root in path_mappings:
+        try:
+            relative_path = remote_path.relative_to(PurePosixPath(moviepilot_root))
+        except ValueError:
+            continue
+        if not relative_path.parts or ".." in relative_path.parts:
+            return False
+        candidate = mounted_root.joinpath(*relative_path.parts)
+        return candidate.is_file() and candidate.suffix.casefold() in _VIDEO_SUFFIXES
+    return False
 
 
 def _title_with_year(name: str, year: str) -> str:

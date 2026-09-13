@@ -21,6 +21,22 @@ def _csv_values(value: str) -> frozenset[str]:
     return frozenset(item.strip().casefold() for item in value.split(",") if item.strip())
 
 
+def _moviepilot_media_path_mappings(value: str) -> tuple[tuple[str, Path], ...]:
+    mappings: list[tuple[str, Path]] = []
+    for entry in value.split(","):
+        moviepilot_path, separator, mounted_path = entry.strip().partition("=")
+        moviepilot_path = moviepilot_path.rstrip("/") or "/"
+        mounted_path = mounted_path.strip()
+        if not entry.strip():
+            continue
+        if not separator or not moviepilot_path.startswith("/") or not mounted_path.startswith("/"):
+            raise RuntimeError(
+                "MOVIEPILOT_MEDIA_PATH_MAPPINGS entries must be /moviepilot/path=/mounted/path"
+            )
+        mappings.append((moviepilot_path, Path(mounted_path)))
+    return tuple(sorted(mappings, key=lambda item: len(item[0]), reverse=True))
+
+
 def _origin(value: str) -> str:
     parsed = urlsplit(value.strip())
     if parsed.scheme not in {"http", "https"} or not parsed.netloc or parsed.path not in {"", "/"}:
@@ -50,6 +66,7 @@ class Settings:
     moviepilot_base_url: str = ""
     moviepilot_api_token: str = ""
     moviepilot_database_url: str = ""
+    moviepilot_media_path_mappings: tuple[tuple[str, Path], ...] = ()
     moviepilot_sync_interval_seconds: int = 1800
     path_map_api_secret: str = ""
     manager_admin_usernames: frozenset[str] = frozenset()
@@ -105,6 +122,9 @@ class Settings:
             moviepilot_base_url=os.environ.get("MOVIEPILOT_BASE_URL", "").strip().rstrip("/"),
             moviepilot_api_token=os.environ.get("MOVIEPILOT_API_TOKEN", "").strip(),
             moviepilot_database_url=moviepilot_database_url,
+            moviepilot_media_path_mappings=_moviepilot_media_path_mappings(
+                os.environ.get("MOVIEPILOT_MEDIA_PATH_MAPPINGS", "")
+            ),
             moviepilot_sync_interval_seconds=_positive_seconds(
                 "MOVIEPILOT_SYNC_INTERVAL_SECONDS", 1800
             ),
