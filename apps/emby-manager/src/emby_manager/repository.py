@@ -397,39 +397,43 @@ class LegacyEmbyRepository:
             "source_skipped": source_skipped,
         }
 
-    def tracked_series_path_targets(self) -> dict[str, str]:
+    def series_path_targets(self) -> dict[str, dict[str, object]]:
+        """Return existing Emby series directories keyed by their TMDB identity.
+
+        The Emby-side name/category is the destination authority.  MoviePilot's
+        organized name is only ever used as the transfer source hint because a
+        later scrape can rename the very same title.
+        """
         rows = self._all(
-            '''SELECT s.themoviedb,l.name AS library_name
+            '''SELECT s.id::text AS id,s.themoviedb,s.name,s.alias,l.name AS library_name
             FROM dragonli_emby_series s
             INNER JOIN dragonli_library_subfolders l ON l.seq=s.parent_id
-            WHERE s.isvalid=1 AND s."update" IS TRUE
+            WHERE s.isvalid=1
               AND s.themoviedb IS NOT NULL AND btrim(s.themoviedb) <> ''
             ORDER BY s.themoviedb,s.id'''
         )
-        targets: dict[str, str] = {}
+        targets: dict[str, dict[str, object]] = {}
         for row in rows:
             tmdb_id = _string(row.get("themoviedb"))
             library_name = _string(row.get("library_name"))
-            if tmdb_id and library_name:
-                # The library is manually maintained by the operator and wins over
-                # MoviePilot's automatic category.
-                targets[tmdb_id] = library_name
+            if tmdb_id and library_name and _string(row.get("name")):
+                targets[tmdb_id] = row
         return targets
 
-    def tracked_series_cloud_path_targets(self) -> list[dict[str, object]]:
-        """Return tracked series with a manually supplied cloud source link.
+    def series_cloud_path_targets(self) -> list[dict[str, object]]:
+        """Return series with a manually supplied cloud source link.
 
         ``quark`` and ``alipan`` are maintained by the operator on the existing
-        Dragonli tracking row.  Their presence means the title was supplied
-        manually and must be included in the transfer map even when MoviePilot
-        has no transfer-history record for it.
+        Dragonli series row. Their presence is an explicit operator instruction
+        to include the title in the transfer map, independent of tracking state
+        or MoviePilot transfer history.
         """
         return self._all(
             '''SELECT s.id::text AS id,s.name,s.alias,s.themoviedb,s.quark,s.alipan,
                       l.name AS library_name
                FROM dragonli_emby_series s
                INNER JOIN dragonli_library_subfolders l ON l.seq=s.parent_id
-               WHERE s.isvalid=1 AND s."update" IS TRUE
+               WHERE s.isvalid=1
                  AND l.name IS NOT NULL AND btrim(l.name) <> ''
                  AND (
                     (s.quark IS NOT NULL AND btrim(s.quark) <> '')

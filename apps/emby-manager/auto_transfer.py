@@ -239,8 +239,57 @@ def load_mapping_file(path: str):
     return mappings
 
 
+def write_mapping_file(path: Path, mappings: list[tuple[str, str]]) -> None:
+    """Atomically persist normalized mapping pairs."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    lines = [f"{src_root.rstrip('/') }|{dst_root.rstrip('/')}" for src_root, dst_root in mappings]
+    with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=path.parent, delete=False) as handle:
+        handle.write("\n".join(lines))
+        if lines:
+            handle.write("\n")
+        temporary_path = handle.name
+    os.replace(temporary_path, path)
+
+
+def differs_from_default_destination(src_root: str, dst_root: str) -> bool:
+    """Whether a legacy mapping intentionally redirects into another directory."""
+    normalized_target = dst_root.rstrip("/")
+    return normalized_target != f"/data/media/tv/{src_root.strip('/')}"
+
+
+def mapping_override_file(cfg: dict, mapping_file: str) -> Path:
+    configured = str(cfg.get("mapping_overrides_file") or "").strip()
+    if configured:
+        return Path(configured)
+    target = Path(mapping_file)
+    return target.with_name(f"{target.stem}.overrides{target.suffix}")
+
+
+def load_or_migrate_mapping_overrides(cfg: dict, mapping_file: str) -> list[tuple[str, str]]:
+    """Keep operator-maintained directory aliases across remote map refreshes.
+
+    Older deployments stored aliases in ``path_map.txt`` itself. On the first
+    refresh, migrate only entries whose destination differs from the default
+    ``/data/media/tv/<source>`` layout into a separate, durable override file.
+    """
+    override_file = mapping_override_file(cfg, mapping_file)
+    if override_file.exists():
+        return load_mapping_file(str(override_file))
+    if not os.path.exists(mapping_file):
+        return []
+    overrides = [
+        (src_root, dst_root)
+        for src_root, dst_root in load_mapping_file(mapping_file)
+        if differs_from_default_destination(src_root, dst_root)
+    ]
+    if overrides:
+        write_mapping_file(override_file, overrides)
+        log(f"Migrated {len(overrides)} manual mapping overrides to {override_file}")
+    return overrides
+
+
 def refresh_mapping_file(cfg: dict, mapping_file: str) -> None:
-    """Fetch an HMAC-authenticated remote mapping and replace the local file atomically."""
+    """Fetch an HMAC-authenticated map while preserving manual directory aliases."""
     api = cfg.get("path_map_api")
     if not isinstance(api, dict):
         return
@@ -271,6 +320,9 @@ def refresh_mapping_file(cfg: dict, mapping_file: str) -> None:
         endpoint,
         headers={
             "Accept": "text/plain",
+            # The public endpoint sits behind a WAF that challenges urllib's
+            # default user agent before the HMAC-authenticated request reaches it.
+            "User-Agent": "Mozilla/5.0",
             "X-Path-Map-Timestamp": timestamp,
             "X-Path-Map-Nonce": nonce,
             "X-Path-Map-Signature": signature,
@@ -289,15 +341,25 @@ def refresh_mapping_file(cfg: dict, mapping_file: str) -> None:
     lines = [line.strip() for line in text.splitlines() if line.strip()]
     if lines and any("|" not in line for line in lines):
         raise RuntimeError("path_map_api response has an invalid mapping line")
-    target = Path(mapping_file)
-    target.parent.mkdir(parents=True, exist_ok=True)
-    with tempfile.NamedTemporaryFile("w", encoding="utf-8", dir=target.parent, delete=False) as handle:
-        handle.write("\n".join(lines))
-        if lines:
-            handle.write("\n")
-        temporary_path = handle.name
-    os.replace(temporary_path, target)
-    log(f"Refreshed mapping file from node {node_id}: {len(lines)} entries")
+    remote_mappings = []
+    for line in lines:
+        src_root, dst_root = line.split("|", 1)
+        src_root = src_root.strip().rstrip("/")
+        dst_root = dst_root.strip().rstrip("/")
+        if src_root and dst_root:
+            remote_mappings.append((src_root, dst_root))
+
+    overrides = load_or_migrate_mapping_overrides(cfg, mapping_file)
+    override_sources = {src_root for src_root, _ in overrides}
+    merged_mappings = [
+        mapping for mapping in remote_mappings if mapping[0] not in override_sources
+    ]
+    merged_mappings.extend(overrides)
+    write_mapping_file(Path(mapping_file), merged_mappings)
+    log(
+        f"Refreshed mapping file from node {node_id}: {len(merged_mappings)} entries "
+        f"({len(overrides)} manual overrides)"
+    )
 
 
 def parse_args():

@@ -81,59 +81,25 @@ class EmbyManagementService:
         cached = self._series_path_cache.get(requested_node)
         if cached and monotonic() - cached[0] < _PATH_MAP_CACHE_SECONDS:
             return cached[1].copy()
-        targets = self._repository.tracked_series_path_targets()
-        cloud_targets = self._repository.tracked_series_cloud_path_targets()
-        if not targets and not cloud_targets and not self._moviepilot_media_path_mappings:
+        targets = self._repository.series_path_targets()
+        cloud_targets = self._repository.series_cloud_path_targets()
+        if not targets and not cloud_targets:
             self._series_path_cache[requested_node] = (monotonic(), [])
             return []
         library_nodes = self._repository.library_nodes()
-        series_library_names = {
-            _text(library.get("name")) for library in self._repository.list_libraries()
-        }
 
         resolved: dict[str, str] = {}
-        live_destinations: list[str] = []
-        if self._moviepilot_database_url:
+        if self._moviepilot_database_url and self._moviepilot_media_path_mappings:
             if targets:
                 resolved = await asyncio.to_thread(
                     _latest_moviepilot_destinations, self._moviepilot_database_url, targets,
                 )
-            if self._moviepilot_media_path_mappings:
-                live_destinations = await asyncio.to_thread(
-                    _live_moviepilot_transfer_destinations, self._moviepilot_database_url,
-                )
-        elif targets or self._moviepilot_media_path_mappings:
+        elif targets:
             logger.warning("moviepilot_transfer_history_unavailable")
 
         result: list[dict[str, str]] = []
         mapping_keys: set[tuple[str, str]] = set()
         mapped_sources: set[str] = set()
-        for tmdb_id, target_library in targets.items():
-            match = resolved.get(tmdb_id)
-            if match is None:
-                continue
-            location = _moviepilot_media_directory(match, library_nodes)
-            if location is None:
-                logger.warning(
-                    "moviepilot_transfer_path_unusable tmdb_id=%s destination=%r",
-                    tmdb_id, match,
-                )
-                continue
-            _, source_directory = location
-            target_node = _default_transfer_node(target_library)
-            if target_node != requested_node:
-                continue
-            target_directory = _replace_library_directory(source_directory, target_library)
-            entry = {
-                "library_name": target_library,
-                "tmdb_id": tmdb_id,
-                "source_hint": f"{source_directory}/",
-                "destination_path": f"/data/media/tv/{target_directory}/",
-            }
-            result.append(entry)
-            mapping_keys.add((entry["source_hint"], entry["destination_path"]))
-            mapped_sources.add(entry["source_hint"])
-
         for target in cloud_targets:
             target_library = _text(target.get("library_name"))
             if _default_transfer_node(target_library) != requested_node:
@@ -157,11 +123,10 @@ class EmbyManagementService:
                 mapping_keys.add(key)
                 mapped_sources.add(entry["source_hint"])
 
-        # One-off manual downloads have no subscription/tracking row.  The transfer
-        # history supplies their organized destination, but history is not truth: a
-        # row is emitted only while its exact video file still exists in the
-        # read-only MoviePilot media mount.
-        for destination in live_destinations:
+        for tmdb_id, target in targets.items():
+            destination = resolved.get(tmdb_id)
+            if not destination:
+                continue
             if not _moviepilot_destination_is_live(
                 destination, self._moviepilot_media_path_mappings,
             ):
@@ -169,9 +134,11 @@ class EmbyManagementService:
             location = _moviepilot_media_directory(destination, library_nodes)
             if location is None:
                 continue
-            target_library, source_directory = location
-            if target_library not in series_library_names:
+            _, source_directory = location
+            target_directory = _tracked_cloud_media_directory(target)
+            if target_directory is None:
                 continue
+            target_library = _text(target.get("library_name"))
             target_node = _default_transfer_node(target_library)
             if target_node != requested_node:
                 continue
@@ -180,9 +147,9 @@ class EmbyManagementService:
                 continue
             entry = {
                 "library_name": target_library,
-                "tmdb_id": "",
+                "tmdb_id": tmdb_id,
                 "source_hint": source_hint,
-                "destination_path": f"/data/media/tv/{source_directory}/",
+                "destination_path": f"/data/media/tv/{target_directory}/",
             }
             result.append(entry)
             mapping_keys.add((entry["source_hint"], entry["destination_path"]))
@@ -534,12 +501,6 @@ def _moviepilot_media_directory(
     return None
 
 
-def _replace_library_directory(source_directory: str, target_library: str) -> str:
-    """Keep MoviePilot's real scraped series folder while applying the manual library."""
-    _, separator, remainder = source_directory.partition("/")
-    return f"{target_library}/{remainder}" if separator else target_library
-
-
 def _tracked_cloud_media_directory(target: Mapping[str, object]) -> str | None:
     """Build ``category/title (year)`` for a manually linked tracking row.
 
@@ -583,6 +544,7 @@ def _latest_moviepilot_destinations(
     query = '''SELECT DISTINCT ON (media_id) media_id,dest
         FROM transferhistory
         WHERE status IS TRUE AND dest IS NOT NULL
+          AND type='电视剧'
           AND lower(media_source) IN ('tmdb', 'themoviedb')
           AND media_id = ANY(%s)
         ORDER BY media_id,id DESC'''
@@ -598,22 +560,6 @@ def _latest_moviepilot_destinations(
         for row in rows
         if (destination := _text(row[1]))
     }
-
-
-def _live_moviepilot_transfer_destinations(database_url: str) -> list[str]:
-    """Return distinct successful transfer targets without treating history as live state."""
-    query = '''SELECT DISTINCT ON (dest) dest
-        FROM transferhistory
-        WHERE status IS TRUE AND dest IS NOT NULL AND btrim(dest) <> ''
-        ORDER BY dest,id DESC'''
-    try:
-        with psycopg.connect(database_url, connect_timeout=5) as connection:
-            with connection.cursor() as cursor:
-                cursor.execute(query)
-                rows = cursor.fetchall()
-    except psycopg.Error as error:
-        raise RuntimeError(f"MoviePilot PostgreSQL query failed: {error}") from error
-    return [destination for row in rows if (destination := _text(row[0]))]
 
 
 def _moviepilot_destination_is_live(
