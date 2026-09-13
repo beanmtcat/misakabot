@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from contextlib import closing
 from datetime import date, datetime, timezone
 
@@ -428,9 +428,10 @@ class LegacyEmbyRepository:
         """
         return self._all(
             '''SELECT s.id::text AS id,s.name,s.alias,s.themoviedb,s.quark,s.alipan,
-                      l.name AS library_name
+                      l.name AS library_name,n.name AS node_name
                FROM dragonli_emby_series s
                INNER JOIN dragonli_library_subfolders l ON l.seq=s.parent_id
+               LEFT JOIN dragonli_storage_nodes n ON n.seq=l.node_id
                WHERE s.isvalid=1 AND s."update" IS TRUE
                  AND l.name IS NOT NULL AND btrim(l.name) <> ''
                  AND (
@@ -439,6 +440,25 @@ class LegacyEmbyRepository:
                  )
                ORDER BY l.name,s.name,s.id'''
         )
+
+    def series_storage_nodes(self, series_ids: Iterable[str]) -> dict[str, str]:
+        """Return the configured storage node for exact Emby series IDs."""
+        ids = sorted({parsed for value in series_ids if (parsed := _positive_int(value)) is not None})
+        if not ids:
+            return {}
+        rows = self._all(
+            '''SELECT s.id::text AS id,n.name AS node_name
+               FROM dragonli_emby_series s
+               INNER JOIN dragonli_library_subfolders l ON l.seq=s.parent_id
+               LEFT JOIN dragonli_storage_nodes n ON n.seq=l.node_id
+               WHERE s.id = ANY(%s) AND s.isvalid=1''',
+            (ids,),
+        )
+        return {
+            _string(row.get("id")): _string(row.get("node_name"))
+            for row in rows
+            if _string(row.get("id")) and _string(row.get("node_name"))
+        }
 
     def library_nodes(self) -> dict[str, str]:
         """Return the actual destination library's configured node, with legacy defaults."""

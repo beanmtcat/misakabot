@@ -101,7 +101,8 @@ class EmbyManagementService:
         mapped_sources: set[str] = set()
         for target in cloud_targets:
             target_library = _text(target.get("library_name"))
-            if _default_transfer_node(target_library) != requested_node:
+            target_node = _transfer_node(target_library, _text(target.get("node_name")))
+            if target_node != requested_node:
                 continue
             source_directory = _tracked_cloud_media_directory(target)
             if source_directory is None:
@@ -122,6 +123,9 @@ class EmbyManagementService:
                 mapping_keys.add(key)
                 mapped_sources.add(entry["source_hint"])
 
+        moviepilot_nodes = self._repository.series_storage_nodes(
+            entry["item_id"] for entry in moviepilot_entries
+        )
         for moviepilot_entry in moviepilot_entries:
             destination = moviepilot_entry["source_destination"]
             if not _moviepilot_destination_is_live(
@@ -136,7 +140,9 @@ class EmbyManagementService:
                 continue
             _, source_directory = source_location
             target_library, target_directory = target_location
-            target_node = _default_transfer_node(target_library)
+            target_node = _transfer_node(
+                target_library, moviepilot_nodes.get(moviepilot_entry["item_id"], ""),
+            )
             if target_node != requested_node:
                 continue
             source_hint = f"{source_directory}/"
@@ -516,14 +522,9 @@ def _tracked_cloud_media_directory(target: Mapping[str, object]) -> str | None:
     return f"{library_name}/{_title_with_year(name, year)}"
 
 
-def _default_transfer_node(library_name: str) -> str:
-    """Resolve the transfer target when a series has no dedicated node field.
-
-    ``library_subfolders.node_id`` identifies the Emby source library node, not the
-    destination of the auto-transfer job. The legacy series table has no per-series
-    target-node column, so route by the operator-maintained media category instead.
-    """
-    return "emby2" if library_name.startswith("动漫集") else "emby0"
+def _transfer_node(library_name: str, configured_node: str) -> str:
+    """Use the exact Emby node; fall back only when no node is known."""
+    return configured_node or ("emby2" if library_name.startswith("动漫集") else "emby0")
 
 
 def _moviepilot_transfer_path_entries(database_url: str) -> list[dict[str, str]]:
@@ -541,7 +542,7 @@ def _moviepilot_transfer_path_entries(database_url: str) -> list[dict[str, str]]
         WHERE status IS TRUE AND dest IS NOT NULL
           AND type='电视剧'
         ORDER BY category,title,year,media_source,media_id,id DESC'''
-    item_query = '''SELECT server,library,title,media_source,media_id,path,seasoninfo
+    item_query = '''SELECT server,library,item_id,title,media_source,media_id,path,seasoninfo
         FROM mediaserveritem
         WHERE path IS NOT NULL AND btrim(path) <> ''
           AND lower(server)='emby'
@@ -558,10 +559,11 @@ def _moviepilot_transfer_path_entries(database_url: str) -> list[dict[str, str]]
 
     indexed_items: list[dict[str, str]] = []
     by_identity: dict[tuple[str, str], dict[str, str]] = {}
-    for server, library, title, source, media_id, path, seasoninfo in items:
+    for server, library, item_id, title, source, media_id, path, seasoninfo in items:
         entry = {
             "server": _text(server),
             "library": _text(library),
+            "item_id": _text(item_id),
             "title": _text(title),
             "media_source": _moviepilot_source_key(_text(source)),
             "media_id": _text(media_id),
@@ -593,6 +595,7 @@ def _moviepilot_transfer_path_entries(database_url: str) -> list[dict[str, str]]
                 "source_destination": organized_destination,
                 "target_path": target_item["path"],
                 "media_id": normalized_media_id,
+                "item_id": target_item["item_id"],
             })
     return result
 
