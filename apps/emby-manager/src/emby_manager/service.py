@@ -522,17 +522,23 @@ def _default_transfer_node(library_name: str) -> str:
 def _latest_moviepilot_destinations(
     database_url: str, targets: Mapping[str, str],
 ) -> dict[str, str]:
-    """Read each tracked TMDB ID's latest successful destination from MoviePilot PostgreSQL."""
+    """Read direct-TMDB transfers from MoviePilot V3 PostgreSQL.
+
+    V3 stores the source-native media identity rather than a separate ``tmdbid``.
+    A Douban/Bangumi identity cannot be safely treated as a TMDB identifier here.
+    """
     tmdb_ids = sorted({
         str(parsed) for tmdb_id in targets
         if (parsed := _positive_int(tmdb_id)) is not None
     })
     if not tmdb_ids:
         return {}
-    query = '''SELECT DISTINCT ON (tmdbid::text) tmdbid::text,dest
+    query = '''SELECT DISTINCT ON (media_id) media_id,dest
         FROM transferhistory
-        WHERE status IS TRUE AND dest IS NOT NULL AND tmdbid::text = ANY(%s)
-        ORDER BY tmdbid::text,id DESC'''
+        WHERE status IS TRUE AND dest IS NOT NULL
+          AND lower(media_source) IN ('tmdb', 'themoviedb')
+          AND media_id = ANY(%s)
+        ORDER BY media_id,id DESC'''
     try:
         with psycopg.connect(database_url, connect_timeout=5) as connection:
             with connection.cursor() as cursor:
