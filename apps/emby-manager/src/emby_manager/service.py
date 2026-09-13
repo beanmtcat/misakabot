@@ -681,7 +681,14 @@ def _moviepilot_titles_share_identity(left: str, right: str) -> bool:
                 else max(previous[index], current[-1])
             )
         previous = current
-    return previous[-1] >= 4
+    common_length = previous[-1]
+    # Four scattered common characters alone are not specific enough: e.g.
+    # “我剩下的恋爱” and “我的AI伴侣 - 奇异恋爱” share four characters but
+    # are unrelated shows.  The common identifier must also cover at least
+    # 80% of the shorter normalized title.
+    return common_length >= 4 and common_length * 5 >= min(
+        len(normalized_left), len(normalized_right)
+    ) * 4
 
 
 def _moviepilot_destination_is_live(
