@@ -531,13 +531,15 @@ def _transfer_node(library_name: str, configured_node: str) -> str:
 
 
 def _moviepilot_transfer_path_entries(database_url: str) -> list[dict[str, str]]:
-    """Map an organized MoviePilot directory to its current Emby item directory.
+    """Map an organized MoviePilot directory to its current scraped directory.
 
     ``transferhistory.dest`` is the stable left-hand directory for auto-transfer.
     MoviePilot's media-server index is the authority for the current scraped
-    right-hand directory.  This deliberately does not use Dragonli's copied
-    TMDB field: a rescrape can replace that identifier while the media-server
-    item still retains the real directory relationship.
+    right-hand directory when it is populated.  MoviePilot V3 installs may
+    have an empty index after migration; in that case an active subscription
+    with the same media identity supplies the current title/year.  Its
+    category intentionally comes from the existing transfer destination:
+    V3's subscription rows do not retain an organized category.
     """
     transfer_query = '''SELECT DISTINCT ON (category,title,year,media_source,media_id)
             dest,media_source,media_id
@@ -550,6 +552,14 @@ def _moviepilot_transfer_path_entries(database_url: str) -> list[dict[str, str]]
         WHERE path IS NOT NULL AND btrim(path) <> ''
           AND lower(server)='emby'
         ORDER BY lst_mod_date DESC NULLS LAST,id DESC'''
+    subscription_query = '''SELECT DISTINCT ON (media_source,media_id)
+            name,year,media_source,media_id
+        FROM subscribe
+        WHERE state='R' AND type='电视剧'
+          AND name IS NOT NULL AND btrim(name) <> ''
+          AND media_source IS NOT NULL AND btrim(media_source) <> ''
+          AND media_id IS NOT NULL AND btrim(media_id) <> ''
+        ORDER BY media_source,media_id,id DESC'''
     try:
         with psycopg.connect(database_url, connect_timeout=5) as connection:
             with connection.cursor() as cursor:
@@ -557,6 +567,8 @@ def _moviepilot_transfer_path_entries(database_url: str) -> list[dict[str, str]]
                 transfers = cursor.fetchall()
                 cursor.execute(item_query)
                 items = cursor.fetchall()
+                cursor.execute(subscription_query)
+                subscriptions = cursor.fetchall()
     except psycopg.Error as error:
         raise RuntimeError(f"MoviePilot PostgreSQL query failed: {error}") from error
 
@@ -582,16 +594,30 @@ def _moviepilot_transfer_path_entries(database_url: str) -> list[dict[str, str]]
         identity = (entry["media_source"], entry["media_id"])
         by_identity.setdefault(identity, entry)
 
+    active_subscriptions: dict[tuple[str, str], tuple[str, str]] = {}
+    for title, year, source, media_id in subscriptions:
+        normalized_title = _text(title)
+        identity = (_moviepilot_source_key(_text(source)), _text(media_id))
+        if normalized_title and all(identity):
+            active_subscriptions.setdefault(identity, (normalized_title, _text(year)))
+
     result: list[dict[str, str]] = []
     for destination, source, media_id in transfers:
         normalized_source = _moviepilot_source_key(_text(source))
         normalized_media_id = _text(media_id)
         source_item = by_identity.get((normalized_source, normalized_media_id))
         if source_item is None:
-            continue
-        target_item = _moviepilot_current_item(source_item, indexed_items)
-        if target_item is None:
-            continue
+            subscription = active_subscriptions.get((normalized_source, normalized_media_id))
+            target_path = _moviepilot_subscription_target_path(
+                _text(destination), subscription[0], subscription[1],
+            ) if subscription is not None else None
+            if target_path is None:
+                continue
+            target_item = {"path": target_path, "item_id": ""}
+        else:
+            target_item = _moviepilot_current_item(source_item, indexed_items)
+            if target_item is None:
+                continue
         organized_destination = _text(destination)
         if organized_destination:
             result.append({
@@ -601,6 +627,16 @@ def _moviepilot_transfer_path_entries(database_url: str) -> list[dict[str, str]]
                 "item_id": target_item["item_id"],
             })
     return result
+
+
+def _moviepilot_subscription_target_path(destination: str, title: str, year: str) -> str | None:
+    """Retarget an existing organized file to the active subscription title."""
+    source = PurePosixPath(destination)
+    series_directory = source.parent if source.suffix else source
+    library_directory = series_directory.parent
+    if not series_directory.name or not library_directory.name:
+        return None
+    return str(library_directory / _title_with_year(title, year))
 
 
 def _moviepilot_source_key(value: str) -> str:
