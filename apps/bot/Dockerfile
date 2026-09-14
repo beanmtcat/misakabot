@@ -15,6 +15,10 @@ RUN groupadd --system --gid "$APP_GID" misakabot \
     && chown -R misakabot:misakabot /app
 
 COPY pyproject.toml ./
+# Keep this runtime resource explicit: a deployment archive that omits it must
+# fail the image build instead of producing a Bot that returns HTTP 500 for
+# every DMIT knowledge-group reply.
+COPY src/misakabot/data/dmit_docs_zh.json ./src/misakabot/data/dmit_docs_zh.json
 COPY src ./src
 COPY tools ./tools
 RUN pip install --no-cache-dir .
