@@ -465,6 +465,9 @@ def _moviepilot_tmdb_id(payload: Mapping[str, object]) -> str | None:
         if value is not None:
             return str(value)
     media_id = _text(payload.get("mediaid") or payload.get("media_id"))
+    media_source = _moviepilot_source_key(_text(payload.get("media_source")))
+    if media_source == "tmdb" and (value := _positive_int(media_id)) is not None:
+        return str(value)
     prefix, separator, value = media_id.partition(":")
     if prefix.lower() == "tmdb" and separator and _positive_int(value) is not None:
         return value
