@@ -387,10 +387,20 @@ def _tracking_snapshot(
     next_episode = details.get("next_episode_to_air")
     last_episode = last if isinstance(last, Mapping) else {}
     upcoming_episode = next_episode if isinstance(next_episode, Mapping) else {}
+    upcoming_season = _positive_int(upcoming_episode.get("season_number"))
+    upcoming_air_date = _date_value(upcoming_episode.get("air_date"))
+    # Do not let TMDB's stale series-level next_episode_to_air select a season.
+    # The season detail lookup below remains the source of the displayed date.
+    scheduled_season = upcoming_season if upcoming_air_date is not None and upcoming_air_date >= today else None
     season_number = (
         _positive_int(row.get("lock_season"))
-        or _positive_int(upcoming_episode.get("season_number"))
+        or scheduled_season
         or _positive_int(last_episode.get("season_number"))
+        # When TMDB has no current-season signal, stay with the newest season
+        # actually indexed by Emby before falling back to an old saved choice or
+        # simply the numerically largest season.
+        or _positive_int(row.get("local_season_number"))
+        or _positive_int(row.get("season_number"))
     )
     if season_number is None and non_special:
         season_number = max(_positive_int(item.get("season_number")) or 0 for item in non_special) or None
@@ -406,11 +416,10 @@ def _tracking_snapshot(
         if _positive_int(last_episode.get("season_number")) == season_number
         else None
     )
-    next_air_date = _date_value(upcoming_episode.get("air_date"))
     next_update = (
-        next_air_date.isoformat()
-        if _positive_int(upcoming_episode.get("season_number")) == season_number
-        and next_air_date is not None and next_air_date >= today
+        upcoming_air_date.isoformat()
+        if upcoming_season == season_number
+        and upcoming_air_date is not None and upcoming_air_date >= today
         else None
     )
     if isinstance(season_details, Mapping):

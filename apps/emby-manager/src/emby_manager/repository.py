@@ -12,6 +12,18 @@ from .emby_client import LoginSession, WatchSession
 
 
 _SHANGHAI_CURRENT_DATE = "(CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Shanghai')::date"
+_MISSING_AIRED_CONDITION = "s.official_latest > 0 AND COALESCE(s.server_latest,0) < s.official_latest"
+_OVERDUE_CONDITION = f"s.next_update IS NOT NULL AND s.next_update < {_SHANGHAI_CURRENT_DATE}"
+# A season with a known total but neither a remaining schedule nor all episodes
+# aired is not silently treated as completed.  TMDB has incomplete metadata for
+# some titles, and this makes those rows visible for review.
+_STALE_METADATA_CONDITION = (
+    "s.next_update IS NULL AND COALESCE(s.total,0) > 0 "
+    "AND COALESCE(s.official_latest,0) < s.total"
+)
+_EXCEPTION_CONDITION = (
+    f"({_OVERDUE_CONDITION}) OR ({_MISSING_AIRED_CONDITION}) OR ({_STALE_METADATA_CONDITION})"
+)
 
 
 class LegacyEmbyRepository:
@@ -512,22 +524,18 @@ class LegacyEmbyRepository:
         if state == "today":
             clauses.append(f"s.next_update={_SHANGHAI_CURRENT_DATE}")
         elif state == "exception":
-            clauses.append(
-                f"(s.next_update IS NOT NULL AND s.next_update < {_SHANGHAI_CURRENT_DATE}) OR "
-                "(s.official_latest > 0 AND COALESCE(s.server_latest,0) != s.official_latest "
-                f"AND (s.next_update IS NULL OR s.next_update != {_SHANGHAI_CURRENT_DATE}))"
-            )
+            # "Today" and "exception" deliberately overlap: a title can have
+            # a scheduled episode today while already missing an aired episode.
+            clauses.append(_EXCEPTION_CONDITION)
         where = " AND ".join(clauses)
         total = self._one(f"SELECT COUNT(*) AS count FROM dragonli_emby_series s WHERE {where}", parameters)
         tracked = self._one(
             'SELECT COUNT(*) AS count FROM dragonli_emby_series WHERE isvalid=1 AND "update" IS TRUE'
         )
         following_counts = self._one(
-            f'''SELECT COUNT(*) FILTER (WHERE next_update={_SHANGHAI_CURRENT_DATE}) AS today,
-            COUNT(*) FILTER (WHERE (next_update IS NOT NULL AND next_update < {_SHANGHAI_CURRENT_DATE}) OR
-              (official_latest > 0 AND COALESCE(server_latest,0) != official_latest
-              AND (next_update IS NULL OR next_update != {_SHANGHAI_CURRENT_DATE}))) AS exception
-            FROM dragonli_emby_series WHERE isvalid=1 AND "update" IS TRUE'''
+            f'''SELECT COUNT(*) FILTER (WHERE s.next_update={_SHANGHAI_CURRENT_DATE}) AS today,
+            COUNT(*) FILTER (WHERE {_EXCEPTION_CONDITION}) AS exception
+            FROM dragonli_emby_series s WHERE s.isvalid=1 AND s."update" IS TRUE'''
         ) or {}
         pagination = "" if size is None else " LIMIT %s OFFSET %s"
         row_parameters = parameters if size is None else [*parameters, size, (page - 1) * size]
@@ -535,6 +543,10 @@ class LegacyEmbyRepository:
             f"""SELECT s.id::text AS id,s.name,s.server_id,s.date_created,s.season,s.season_number,s.lock_season,
             s.server_latest,s.official_latest,s.update_time,s.next_update,s.mtime,s.total,s."update" AS tracking,
             s.themoviedb,s.quark,s.alipan,s.alias,s.index_name,
+            (s.next_update={_SHANGHAI_CURRENT_DATE}) AS is_today,
+            ({_OVERDUE_CONDITION}) AS is_overdue,
+            ({_MISSING_AIRED_CONDITION}) AS is_missing_aired,
+            ({_STALE_METADATA_CONDITION}) AS is_metadata_stale,
             COALESCE(l.name,'—') AS library_name,COALESCE(n.name,'—') AS node_name,n.status AS node_status,
             COALESCE(e.episode_count,0) AS episode_count,COALESCE(e.latest_index,0) AS local_latest,
             e.latest_episode
@@ -807,17 +819,33 @@ class LegacyEmbyRepository:
 
     def list_tracked_series(self) -> list[dict[str, object]]:
         return self._all(
-            '''SELECT id::text AS id,name,themoviedb,lock_season,season_number
-            FROM dragonli_emby_series
-            WHERE isvalid=1 AND "update" IS TRUE
-            ORDER BY next_update ASC NULLS LAST,id ASC'''
+            '''SELECT s.id::text AS id,s.name,s.themoviedb,s.lock_season,s.season_number,
+              latest_local.parent_index_number AS local_season_number
+            FROM dragonli_emby_series s
+            LEFT JOIN LATERAL (
+              SELECT e.parent_index_number
+              FROM dragonli_emby_episodes e
+              WHERE e.series_id=s.id AND e.isvalid=1 AND e.parent_index_number > 0
+              ORDER BY e.date_created DESC NULLS LAST,e.parent_index_number DESC
+              LIMIT 1
+            ) latest_local ON TRUE
+            WHERE s.isvalid=1 AND s."update" IS TRUE
+            ORDER BY s.next_update ASC NULLS LAST,s.id ASC'''
         )
 
     def tracked_series(self, series_id: int) -> dict[str, object] | None:
         return self._one(
-            '''SELECT id::text AS id,name,themoviedb,lock_season,season_number
-            FROM dragonli_emby_series
-            WHERE id=%s AND isvalid=1 AND "update" IS TRUE''',
+            '''SELECT s.id::text AS id,s.name,s.themoviedb,s.lock_season,s.season_number,
+              latest_local.parent_index_number AS local_season_number
+            FROM dragonli_emby_series s
+            LEFT JOIN LATERAL (
+              SELECT e.parent_index_number
+              FROM dragonli_emby_episodes e
+              WHERE e.series_id=s.id AND e.isvalid=1 AND e.parent_index_number > 0
+              ORDER BY e.date_created DESC NULLS LAST,e.parent_index_number DESC
+              LIMIT 1
+            ) latest_local ON TRUE
+            WHERE s.id=%s AND s.isvalid=1 AND s."update" IS TRUE''',
             (series_id,),
         )
 

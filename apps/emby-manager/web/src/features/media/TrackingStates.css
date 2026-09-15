@@ -1,0 +1,7 @@
+.series-row-stale {
+  background: #43252c8c;
+}
+
+:root[data-theme="light"] .series-row-stale {
+  background: #fee7e9;
+}

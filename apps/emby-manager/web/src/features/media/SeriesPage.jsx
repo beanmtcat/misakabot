@@ -3,6 +3,7 @@ import { DataTable, Toolbar } from '../../components/DataTable';
 import TableFooter from '../../components/TableFooter';
 import { api, embyItemUrl, formatDate, formatTime } from '../../lib/api';
 import './MediaPages.css';
+import './TrackingStates.css';
 
 const PAGE_SIZE = 20;
 const blankDetail = { tracking: true, library_name: '', themoviedb: '', quark: '', alipan: '', alias: '', lock_season: '', index_name: '' };
@@ -24,12 +25,18 @@ function updateState(item) {
 function rowStateClass(item) {
   const nextUpdate = String(item.next_update || '').slice(0, 10);
   const today = shanghaiDate();
+  const missingAired = item.is_missing_aired ?? (Number(item.episode_count) < Number(item.official_latest));
+  const overdue = item.is_overdue ?? Boolean(nextUpdate && nextUpdate < today);
+  const metadataStale = item.is_metadata_stale ?? (
+    !nextUpdate && Number(item.total) > 0 && Number(item.official_latest) < Number(item.total)
+  );
   if (Number(item.node_status) === 0) return 'series-row-danger';
-  if (nextUpdate && nextUpdate < today) return 'series-row-stale';
-  if (nextUpdate > today && Number(item.episode_count) < Number(item.official_latest)) return 'series-row-stale';
+  // A title may be due today and already be missing an older aired episode.
+  // In that case the actionable exception wins over the yellow today marker.
+  if (overdue || missingAired || metadataStale) return 'series-row-stale';
   if (Number(item.total) > 0 && Number(item.episode_count) === Number(item.total)) return 'series-row-complete';
   if (Number(item.official_latest) > 0 && Number(item.local_latest) === Number(item.official_latest) && Number(item.episode_count) === Number(item.official_latest)) return 'series-row-caught-up';
-  if (nextUpdate === today) return 'series-row-today';
+  if (item.is_today ?? nextUpdate === today) return 'series-row-today';
   return '';
 }
 
