@@ -21,3 +21,20 @@
   color: #8c9bae;
   font-size: .68rem;
 }
+
+.tracking-state-note {
+  color: #dca8ae;
+  font-weight: 600;
+}
+
+.series-row-today .tracking-state-note {
+  color: #e3c275;
+}
+
+:root[data-theme="light"] .tracking-state-note {
+  color: #a3434f;
+}
+
+:root[data-theme="light"] .series-row-today .tracking-state-note {
+  color: #947018;
+}

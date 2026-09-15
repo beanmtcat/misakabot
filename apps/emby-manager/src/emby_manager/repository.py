@@ -21,6 +21,9 @@ _STALE_METADATA_CONDITION = (
     "s.next_update IS NULL AND COALESCE(s.total,0) > 0 "
     "AND COALESCE(s.official_latest,0) < s.total"
 )
+_COMPLETED_SEASON_CONDITION = (
+    "COALESCE(s.total,0) > 0 AND COALESCE(s.official_latest,0) >= s.total"
+)
 _EXCEPTION_CONDITION = (
     f"({_OVERDUE_CONDITION}) OR ({_MISSING_AIRED_CONDITION}) OR ({_STALE_METADATA_CONDITION})"
 )
@@ -568,6 +571,7 @@ class LegacyEmbyRepository:
             ({_OVERDUE_CONDITION}) AS is_overdue,
             ({_MISSING_AIRED_CONDITION}) AS is_missing_aired,
             ({_STALE_METADATA_CONDITION}) AS is_metadata_stale,
+            ({_COMPLETED_SEASON_CONDITION}) AS is_completed_season,
             COALESCE(l.name,'—') AS library_name,COALESCE(n.name,'—') AS node_name,n.status AS node_status,
             COALESCE(e.episode_count,0) AS episode_count,COALESCE(e.latest_index,0) AS local_latest,
             e.latest_episode

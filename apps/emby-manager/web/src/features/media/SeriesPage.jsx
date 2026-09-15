@@ -40,6 +40,16 @@ function rowStateClass(item) {
   return '';
 }
 
+function trackingStateNotes(item) {
+  const notes = [];
+  if (item.is_overdue) notes.push('播出日期过期');
+  if (item.is_missing_aired) notes.push('缺已播');
+  if (item.is_metadata_stale) notes.push('TMDB 后续日期缺失');
+  if (item.is_today) notes.push('今日更新');
+  if (!notes.length && item.is_completed_season) notes.push('本季已完结');
+  return notes;
+}
+
 function seriesTitle(item) {
   const year = String(item.alias || '');
   return `${item.name || '未命名电视剧'}${/^\d{4}$/.test(year) ? ` (${year})` : ''}`;
@@ -199,7 +209,7 @@ export default function SeriesPage({ notify, archived = false }) {
         <td><span className={`node-state ${item.node_status === 1 ? 'online' : ''}`}><i />{item.node_name}</span><small>{item.library_name}</small></td>
         <td><span className="episode-count">{item.season || (item.season_number ? `第 ${item.season_number} 季` : '季数未知')}</span><small>{item.total ? `官方共 ${item.total} 集 · 本服 ${item.episode_count || 0} 集` : `本服 ${item.episode_count || 0} 集`}</small></td>
         <td><button className="table-link" onClick={() => openComparison(item)}>{updateState(item)}</button><small>点击查看逐集对比</small></td>
-        <td>{formatDate(item.next_update)}<small>同步 {formatTime(item.mtime)}</small></td>
+        <td>{formatDate(item.next_update)}{trackingStateNotes(item).map((note) => <small key={note} className="tracking-state-note">{note}</small>)}<small>同步 {formatTime(item.mtime)}</small></td>
         <td className="action-cell"><div className="series-actions">{Number(item.id) > 0 && item.server_id && <button className="secondary compact" onClick={() => syncOneSeries(item)} disabled={Boolean(syncingId) || syncing}>{String(syncingId) === String(item.id) ? '同步中…' : '同步'}</button>}<button className="secondary compact" onClick={() => openSettings(item)} disabled={Boolean(syncingId) || syncing}>设置</button>{item.alipan && <a className="cloud-link" href={item.alipan} target="_blank" rel="noreferrer">阿里</a>}{item.quark && <a className="cloud-link quark" href={item.quark} target="_blank" rel="noreferrer">夸克</a>}</div></td>
       </tr>)}
     </DataTable>
