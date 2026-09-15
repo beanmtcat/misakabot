@@ -27,10 +27,18 @@ _EXCEPTION_CONDITION = (
 
 
 class LegacyEmbyRepository:
-    """Uses only the existing Dragonli Emby tables; this module intentionally contains no DDL."""
+    """Uses the existing Dragonli Emby tables plus small, idempotent migrations."""
 
     def __init__(self, database_url: str) -> None:
         self._database_url = database_url
+
+    def ensure_tracking_schema(self) -> None:
+        """Add the one operator-maintained mapping field when upgrading an old DB."""
+        self._write(
+            "ALTER TABLE dragonli_emby_series "
+            "ADD COLUMN IF NOT EXISTS path_map_override TEXT",
+            (),
+        )
 
     def upsert_user(self, payload: Mapping[str, object]) -> bool:
         user_id, server_id, username = (_string(payload.get(key)) for key in ("Id", "ServerId", "Name"))
@@ -453,6 +461,19 @@ class LegacyEmbyRepository:
                ORDER BY l.name,s.name,s.id'''
         )
 
+    def series_manual_path_targets(self) -> list[dict[str, object]]:
+        """Return active tracking rows whose transfer path is explicitly overridden."""
+        return self._all(
+            '''SELECT s.id::text AS id,s.themoviedb,s.path_map_override,
+                      l.name AS library_name,n.name AS node_name
+               FROM dragonli_emby_series s
+               INNER JOIN dragonli_library_subfolders l ON l.seq=s.parent_id
+               LEFT JOIN dragonli_storage_nodes n ON n.seq=l.node_id
+               WHERE s.isvalid=1 AND s."update" IS TRUE
+                 AND s.path_map_override IS NOT NULL AND btrim(s.path_map_override) <> ''
+               ORDER BY s.id'''
+        )
+
     def series_storage_nodes(self, series_ids: Iterable[str]) -> dict[str, str]:
         """Return the configured storage node for exact Emby series IDs."""
         ids = sorted({parsed for value in series_ids if (parsed := _positive_int(value)) is not None})
@@ -590,7 +611,7 @@ class LegacyEmbyRepository:
     def series_detail(self, series_id: int) -> dict[str, object] | None:
         return self._one(
             '''SELECT s.id::text AS id,l.name AS library_name,s."update" AS tracking,s.themoviedb,s.quark,s.alipan,s.alias,s.lock_season,
-            s.index_name FROM dragonli_emby_series s
+            s.index_name,s.path_map_override FROM dragonli_emby_series s
             LEFT JOIN dragonli_library_subfolders l ON l.seq=s.parent_id
             WHERE s.id=%s AND s.isvalid=1''',
             (series_id,),
@@ -626,11 +647,12 @@ class LegacyEmbyRepository:
             library_id = int(target_library["seq"])
         self._write(
             '''UPDATE dragonli_emby_series SET "update"=%s,themoviedb=%s,quark=%s,alipan=%s,alias=%s,
-            lock_season=%s,index_name=%s,parent_id=COALESCE(%s,parent_id),mtime=NOW() WHERE id=%s AND isvalid=1''',
+            lock_season=%s,index_name=%s,path_map_override=%s,parent_id=COALESCE(%s,parent_id),mtime=NOW() WHERE id=%s AND isvalid=1''',
             (
                 bool(detail["tracking"]), _nullable(detail.get("themoviedb")), _nullable(detail.get("quark")),
                 _nullable(detail.get("alipan")), _nullable(detail.get("alias")),
-                _positive_int(detail.get("lock_season")), _nullable(detail.get("index_name")), library_id, series_id,
+                _positive_int(detail.get("lock_season")), _nullable(detail.get("index_name")),
+                _nullable(detail.get("path_map_override")), library_id, series_id,
             ),
         )
         return True

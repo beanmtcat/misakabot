@@ -74,6 +74,9 @@ class EmbyManagementService:
     def list_libraries(self) -> list[dict[str, object]]:
         return self._repository.list_libraries()
 
+    def ensure_tracking_schema(self) -> None:
+        self._repository.ensure_tracking_schema()
+
     async def series_path_entries_for_node(self, node_id: str) -> list[dict[str, str]]:
         """Build transfer mappings from MoviePilot and manually linked tracked series."""
         requested_node = self._repository.canonical_storage_node(node_id)
@@ -82,8 +85,9 @@ class EmbyManagementService:
         cached = self._series_path_cache.get(requested_node)
         if cached and monotonic() - cached[0] < _PATH_MAP_CACHE_SECONDS:
             return cached[1].copy()
+        manual_targets = self._repository.series_manual_path_targets()
         cloud_targets = self._repository.series_cloud_path_targets()
-        if not cloud_targets and not self._moviepilot_database_url:
+        if not manual_targets and not cloud_targets and not self._moviepilot_database_url:
             self._series_path_cache[requested_node] = (monotonic(), [])
             return []
         library_nodes = self._repository.library_nodes()
@@ -99,7 +103,41 @@ class EmbyManagementService:
         result: list[dict[str, str]] = []
         mapping_keys: set[tuple[str, str]] = set()
         mapped_sources: set[str] = set()
+        manually_mapped_series: set[str] = set()
+        manually_mapped_tmdb_ids: set[str] = set()
+
+        # A saved override is the operator's explicit authority.  It is added
+        # first and suppresses generated mappings for the same tracked title.
+        for target in manual_targets:
+            try:
+                source_directory, target_directory = _manual_path_mapping(
+                    _text(target.get("path_map_override"))
+                )
+            except ValueError:
+                logger.warning("manual_transfer_path_unusable series_id=%s", target.get("id"))
+                continue
+            target_library = _text(target.get("library_name"))
+            target_node = _transfer_node(target_library, _text(target.get("node_name")))
+            if target_node != requested_node:
+                continue
+            entry = {
+                "library_name": target_library,
+                "tmdb_id": _text(target.get("themoviedb")),
+                "source_hint": f"{source_directory}/",
+                "destination_path": f"/data/media/tv/{target_directory}/",
+            }
+            key = (entry["source_hint"], entry["destination_path"])
+            if key not in mapping_keys:
+                result.append(entry)
+                mapping_keys.add(key)
+                mapped_sources.add(entry["source_hint"])
+            manually_mapped_series.add(_text(target.get("id")))
+            if entry["tmdb_id"]:
+                manually_mapped_tmdb_ids.add(entry["tmdb_id"])
+
         for target in cloud_targets:
+            if _text(target.get("id")) in manually_mapped_series:
+                continue
             target_library = _text(target.get("library_name"))
             target_node = _transfer_node(target_library, _text(target.get("node_name")))
             if target_node != requested_node:
@@ -127,6 +165,8 @@ class EmbyManagementService:
             entry["item_id"] for entry in moviepilot_entries
         )
         for moviepilot_entry in moviepilot_entries:
+            if _text(moviepilot_entry["media_id"]) in manually_mapped_tmdb_ids:
+                continue
             destination = moviepilot_entry["source_destination"]
             if not _moviepilot_destination_is_live(
                 destination, self._moviepilot_media_path_mappings,
@@ -181,7 +221,13 @@ class EmbyManagementService:
         return self._repository.series_detail(series_id)
 
     def update_series_detail(self, series_id: int, detail: Mapping[str, object]) -> bool:
-        return self._repository.update_series_detail(series_id, detail)
+        override = _text(detail.get("path_map_override"))
+        if override:
+            _manual_path_mapping(override)
+        updated = self._repository.update_series_detail(series_id, detail)
+        if updated:
+            self._series_path_cache.clear()
+        return updated
 
     def episode_comparison(self, series_id: int) -> dict[str, object] | None:
         return self._repository.episode_comparison(series_id)
@@ -772,6 +818,33 @@ def _moviepilot_destination_is_live(
         candidate = mounted_root.joinpath(*relative_path.parts)
         return candidate.is_file() and candidate.suffix.casefold() in _VIDEO_SUFFIXES
     return False
+
+
+def _manual_path_mapping(value: str) -> tuple[str, str]:
+    """Validate and normalize ``old/category|/data/media/tv/new/category``."""
+    if value.count("|") != 1 or "\n" in value or "\r" in value or "\\" in value:
+        raise ValueError("手工路径映射格式应为：旧目录|/data/media/tv/新目录")
+    source_value, target_value = (part.strip() for part in value.split("|", 1))
+    source = PurePosixPath(source_value)
+    target = PurePosixPath(target_value)
+    if (
+        not source_value
+        or source.is_absolute()
+        or len(source.parts) < 2
+        or any(part in {"", ".", ".."} for part in source.parts)
+    ):
+        raise ValueError("手工路径映射左侧必须是“分类/剧名 (年份)”目录")
+    try:
+        target_relative = target.relative_to(PurePosixPath("/data/media/tv"))
+    except ValueError as error:
+        raise ValueError("手工路径映射右侧必须位于 /data/media/tv/ 下") from error
+    if (
+        not target_relative.parts
+        or len(target_relative.parts) < 2
+        or any(part in {"", ".", ".."} for part in target_relative.parts)
+    ):
+        raise ValueError("手工路径映射右侧必须是 /data/media/tv/分类/剧名 (年份) 目录")
+    return "/".join(source.parts), "/".join(target_relative.parts)
 
 
 def _title_with_year(name: str, year: str) -> str:

@@ -146,6 +146,7 @@ class SeriesDetailChange(BaseModel):
     alias: str | None = None
     lock_season: int | None = None
     index_name: str | None = None
+    path_map_override: str | None = Field(default=None, max_length=1024)
 
 
 def create_app(
@@ -334,6 +335,7 @@ def create_app(
 
     @asynccontextmanager
     async def lifespan(_: FastAPI):
+        await asyncio.to_thread(manager.ensure_tracking_schema)
         stop_event = asyncio.Event()
         tasks = [
             asyncio.create_task(
@@ -694,7 +696,11 @@ def create_app(
     def update_series_detail(
         series_id: int, change: SeriesDetailChange, _: str = Depends(require_write_authorization)
     ) -> dict[str, object]:
-        if not manager.update_series_detail(series_id, change.model_dump()):
+        try:
+            updated = manager.update_series_detail(series_id, change.model_dump())
+        except ValueError as error:
+            raise HTTPException(status_code=422, detail=str(error)) from error
+        if not updated:
             raise HTTPException(status_code=404, detail="电视剧不存在或已失效")
         return {"id": series_id, "updated": True}
 
