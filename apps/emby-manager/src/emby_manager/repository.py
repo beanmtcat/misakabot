@@ -980,6 +980,42 @@ class LegacyEmbyRepository:
             "created": created,
         }
 
+    def enable_moviepilot_series_by_name_year(
+        self, subscriptions: Iterable[tuple[str, str]],
+    ) -> dict[str, int]:
+        """Enable only unambiguous non-TMDB MoviePilot subscriptions.
+
+        MoviePilot can subscribe through Douban without exposing a TMDB ID.  We
+        never create a tracking row from that incomplete identity.  An existing
+        Emby row may be enabled only when both its title and its scraper year
+        (stored in ``alias``) are exact, and the pair identifies one row.
+        """
+        identities = sorted({(name.strip(), year.strip()) for name, year in subscriptions if name and year})
+        if not identities:
+            return {"matched": 0, "enabled": 0}
+        matched = enabled = 0
+        with closing(psycopg.connect(self._database_url, row_factory=dict_row)) as connection:
+            with connection.transaction():
+                connection.execute("SELECT pg_advisory_xact_lock(%s)", (94127104,))
+                for name, year in identities:
+                    rows = connection.execute(
+                        """SELECT id,\"update\" FROM dragonli_emby_series
+                        WHERE isvalid=1 AND name=%s AND alias=%s""",
+                        (name, year),
+                    ).fetchall()
+                    if len(rows) != 1:
+                        continue
+                    matched += 1
+                    row = rows[0]
+                    if row["update"] is True:
+                        continue
+                    connection.execute(
+                        '''UPDATE dragonli_emby_series SET "update"=TRUE,mtime=NOW() WHERE id=%s''',
+                        (row["id"],),
+                    )
+                    enabled += 1
+        return {"matched": matched, "enabled": enabled}
+
     def _all(self, sql: str, parameters: list[object] | tuple[object, ...] = ()) -> list[dict[str, object]]:
         with closing(psycopg.connect(self._database_url, row_factory=dict_row)) as connection:
             return list(connection.execute(sql, parameters).fetchall())

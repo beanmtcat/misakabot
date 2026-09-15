@@ -257,16 +257,27 @@ class EmbyManagementService:
         if self._moviepilot_client is None:
             raise RuntimeError("MoviePilot is not configured")
         subscriptions = await self._moviepilot_client.list_subscriptions()
+        tv_subscriptions = [item for item in subscriptions if _moviepilot_is_tv(item)]
         series = {
             tmdb_id: _moviepilot_title(item, tmdb_id)
-            for item in subscriptions if _moviepilot_is_tv(item)
+            for item in tv_subscriptions
             if (tmdb_id := _moviepilot_tmdb_id(item)) is not None
         }
         result = self._repository.import_moviepilot_series(series)
+        name_year_subscriptions = {
+            (_moviepilot_title(item, ""), _text(item.get("year")))
+            for item in tv_subscriptions
+            if _moviepilot_tmdb_id(item) is None
+            and _moviepilot_title(item, "")
+            and _is_year(_text(item.get("year")))
+        }
+        legacy_result = self._repository.enable_moviepilot_series_by_name_year(
+            name_year_subscriptions
+        )
         return {
-            "subscriptions": len(series),
-            "matched": result["matched"],
-            "enabled": result["enabled"],
+            "subscriptions": len(tv_subscriptions),
+            "matched": result["matched"] + legacy_result["matched"],
+            "enabled": result["enabled"] + legacy_result["enabled"],
             "created": result["created"],
         }
 
