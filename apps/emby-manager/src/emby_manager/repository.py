@@ -12,7 +12,17 @@ from .emby_client import LoginSession, WatchSession
 
 
 _SHANGHAI_CURRENT_DATE = "(CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Shanghai')::date"
-_MISSING_AIRED_CONDITION = "s.official_latest > 0 AND COALESCE(s.server_latest,0) < s.official_latest"
+# A date-only source cannot say what time an episode becomes available.  An
+# episode dated today belongs to the yellow "today" state, not to an existing
+# missing-episode exception.  Compare against TMDB episodes dated before today
+# so a row turns pink only when it was already behind yesterday.
+_MISSING_AIRED_CONDITION = f'''COALESCE(s.server_latest,0) < COALESCE((
+    SELECT COUNT(DISTINCT episode.episode_number)
+    FROM dragonli_tmdb_episodes episode
+    WHERE episode.tid=s.id AND episode.isvalid=1
+      AND episode.season_number=COALESCE(s.lock_season,s.season_number)
+      AND episode.air_date IS NOT NULL AND episode.air_date < {_SHANGHAI_CURRENT_DATE}
+),0)'''
 _OVERDUE_CONDITION = f"s.next_update IS NOT NULL AND s.next_update < {_SHANGHAI_CURRENT_DATE}"
 # A season with a known total but neither a remaining schedule nor all episodes
 # aired is not silently treated as completed.  TMDB has incomplete metadata for
