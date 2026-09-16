@@ -37,6 +37,14 @@ class GroupChallengeResolution:
     attempts_left: int
 
 
+@dataclass(frozen=True)
+class ModerationReviewTarget:
+    event_id: int
+    chat_id: int
+    message_id: int
+    user_id: int
+
+
 class _SqliteConnection:
     """Accept PostgreSQL-style placeholders while keeping the local backup backend testable."""
 
@@ -124,6 +132,13 @@ class AuditRepository:
                 ON moderation_events(chat_id, action, id DESC)
                 """
             )
+            moderation_columns = {row[1] for row in connection.execute("PRAGMA table_info(moderation_events)")}
+            if "review_message_id" not in moderation_columns:
+                connection.execute("ALTER TABLE moderation_events ADD COLUMN review_message_id INTEGER")
+            if "reviewed_by_user_id" not in moderation_columns:
+                connection.execute("ALTER TABLE moderation_events ADD COLUMN reviewed_by_user_id INTEGER")
+            if "reviewed_at" not in moderation_columns:
+                connection.execute("ALTER TABLE moderation_events ADD COLUMN reviewed_at TEXT")
             columns = {row[1] for row in connection.execute("PRAGMA table_info(member_onboarding)")}
             if "verification_flow" not in columns:
                 connection.execute(
@@ -285,6 +300,64 @@ class AuditRepository:
                 "SELECT id FROM moderation_events WHERE chat_id=%s AND message_id=%s",
                 (incoming.chat_id, incoming.message_id),
             ).fetchone()[0])
+
+    def set_moderation_review_message(self, event_id: int, chat_id: int, review_message_id: int) -> bool:
+        with closing(self._connect()) as connection:
+            cursor = connection.execute(
+                """UPDATE moderation_events SET review_message_id=%s
+                WHERE id=%s AND chat_id=%s AND action=%s AND review_status=%s""",
+                (review_message_id, event_id, chat_id, Action.NEEDS_REVIEW.value, ReviewStatus.PENDING.value),
+            )
+            connection.commit()
+            return cursor.rowcount == 1
+
+    def claim_moderation_review(self, event_id: int, chat_id: int, now: str) -> ModerationReviewTarget | None:
+        """Atomically reserve one pending moderation card for an administrator decision."""
+        with closing(self._connect()) as connection:
+            connection.execute("BEGIN IMMEDIATE")
+            cursor = connection.execute(
+                """UPDATE moderation_events SET review_status=%s,updated_at=%s
+                WHERE id=%s AND chat_id=%s AND action=%s AND review_status=%s""",
+                ("resolving", now, event_id, chat_id, Action.NEEDS_REVIEW.value, ReviewStatus.PENDING.value),
+            )
+            if cursor.rowcount != 1:
+                connection.rollback()
+                return None
+            row = connection.execute(
+                "SELECT message_id,user_id FROM moderation_events WHERE id=%s AND chat_id=%s",
+                (event_id, chat_id),
+            ).fetchone()
+            connection.commit()
+        if row is None:
+            return None
+        return ModerationReviewTarget(event_id, chat_id, int(row[0]), int(row[1]))
+
+    def complete_moderation_review(
+        self,
+        event_id: int,
+        chat_id: int,
+        actor_user_id: int,
+        action: Action,
+        review_status: ReviewStatus,
+        now: str,
+    ) -> bool:
+        with closing(self._connect()) as connection:
+            cursor = connection.execute(
+                """UPDATE moderation_events SET action=%s,review_status=%s,reviewed_by_user_id=%s,
+                reviewed_at=%s,updated_at=%s WHERE id=%s AND chat_id=%s AND review_status=%s""",
+                (action.value, review_status.value, actor_user_id, now, now, event_id, chat_id, "resolving"),
+            )
+            connection.commit()
+            return cursor.rowcount == 1
+
+    def reopen_moderation_review(self, event_id: int, chat_id: int, now: str) -> None:
+        with closing(self._connect()) as connection:
+            connection.execute(
+                """UPDATE moderation_events SET review_status=%s,updated_at=%s
+                WHERE id=%s AND chat_id=%s AND review_status=%s""",
+                (ReviewStatus.PENDING.value, now, event_id, chat_id, "resolving"),
+            )
+            connection.commit()
 
     def query_all(self, sql: str, parameters: tuple[object, ...] | list[object] = ()) -> list[dict[str, object]]:
         """Execute a read query and return portable mapping rows for the audit API."""
@@ -1085,6 +1158,9 @@ CREATE TABLE IF NOT EXISTS moderation_events (
     verdict_json JSONB,
     action TEXT NOT NULL,
     review_status TEXT NOT NULL,
+    review_message_id BIGINT,
+    reviewed_by_user_id BIGINT,
+    reviewed_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ NOT NULL,
     updated_at TIMESTAMPTZ NOT NULL,
     UNIQUE(chat_id, message_id)
@@ -1245,4 +1321,10 @@ class PostgresAuditRepository(AuditRepository):
             for statement in POSTGRES_SCHEMA.split(";"):
                 if statement.strip():
                     connection.execute(statement)
+            for statement in (
+                "ALTER TABLE moderation_events ADD COLUMN IF NOT EXISTS review_message_id BIGINT",
+                "ALTER TABLE moderation_events ADD COLUMN IF NOT EXISTS reviewed_by_user_id BIGINT",
+                "ALTER TABLE moderation_events ADD COLUMN IF NOT EXISTS reviewed_at TIMESTAMPTZ",
+            ):
+                connection.execute(statement)
             connection.commit()

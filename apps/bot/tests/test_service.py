@@ -3,7 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from misakabot.domain import Action, MessageInput, ModerationVerdict
+from misakabot.domain import Action, MessageInput, ModerationVerdict, ReviewStatus
 from misakabot.llm import RuleBasedModerationClient
 from misakabot.repository import AuditRepository
 from misakabot.service import ModerationService
@@ -235,6 +235,43 @@ class ModerationServiceTests(unittest.TestCase):
             )
         self.assertEqual(outcome.action, Action.NEEDS_REVIEW)
         self.assertEqual(gateway.calls, [])
+
+    def test_pending_review_can_only_be_claimed_once_and_records_admin_decision(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            repository = AuditRepository(Path(directory) / "audit.sqlite3")
+            repository.initialize()
+            gateway = FakeGateway()
+            service = ModerationService(repository, gateway, IncorrectHighRiskVerdictClient())
+            outcome = asyncio.run(
+                service.moderate(
+                    MessageInput(
+                        chat_id=-1001,
+                        message_id=52,
+                        user_id=19,
+                        text="搞定 GPT-Plus、Kiro、Claude，任何都能付费",
+                    )
+                )
+            )
+            assert outcome.event_id is not None
+            target = repository.claim_moderation_review(outcome.event_id, -1001, "2026-09-16T12:00:00+00:00")
+            duplicate = repository.claim_moderation_review(outcome.event_id, -1001, "2026-09-16T12:00:01+00:00")
+            completed = repository.complete_moderation_review(
+                outcome.event_id, -1001, 99, Action.ALLOW, ReviewStatus.FALSE_POSITIVE,
+                "2026-09-16T12:00:02+00:00",
+            )
+            stored = repository.query_one(
+                "SELECT action,review_status,reviewed_by_user_id FROM moderation_events WHERE id=%s",
+                (outcome.event_id,),
+            )
+        self.assertIsNotNone(target)
+        self.assertEqual(target.user_id if target else None, 19)
+        self.assertIsNone(duplicate)
+        self.assertTrue(completed)
+        self.assertEqual(stored, {
+            "action": Action.ALLOW.value,
+            "review_status": ReviewStatus.FALSE_POSITIVE.value,
+            "reviewed_by_user_id": 99,
+        })
 
 
 if __name__ == "__main__":

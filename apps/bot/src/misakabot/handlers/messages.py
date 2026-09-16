@@ -85,6 +85,21 @@ def build_message_router(
                 outcome.action,
                 outcome.event_id,
             )
+            if outcome.action is Action.NEEDS_REVIEW and outcome.event_id is not None:
+                try:
+                    review_message_id = await service.gateway.send_moderation_review(
+                        message.chat.id, message.message_id, outcome.event_id
+                    )
+                    service.repository.set_moderation_review_message(
+                        outcome.event_id, message.chat.id, review_message_id
+                    )
+                except Exception:
+                    # The audit event remains pending even if Telegram cannot accept the
+                    # card, so an administrator can still resolve it from the audit UI.
+                    logger.exception(
+                        "moderation.review_card_failed chat_id=%s message_id=%s event_id=%s",
+                        message.chat.id, message.message_id, outcome.event_id,
+                    )
 
         if outcome is None or outcome.action in {Action.ALLOW, Action.RELEASE}:
             await replies.handle(message)

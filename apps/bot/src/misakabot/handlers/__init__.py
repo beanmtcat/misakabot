@@ -9,6 +9,7 @@ from ..service import ModerationService
 from .admin import AdminActions
 from .commands import build_command_router
 from .messages import build_message_router
+from .moderation import build_moderation_router
 from .onboarding import build_onboarding_router
 
 def build_dispatcher(
@@ -33,6 +34,7 @@ def build_dispatcher(
     dispatcher.include_routers(
         build_command_router(service, onboarding, allowed_group_ids, admin, replies, audit_web_app_url),
         build_onboarding_router(service, onboarding, allowed_group_ids, admin),
+        build_moderation_router(service, allowed_group_ids, admin),
         build_message_router(service, onboarding, allowed_group_ids, replies),
     )
     return dispatcher

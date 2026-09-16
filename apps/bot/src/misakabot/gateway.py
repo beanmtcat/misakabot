@@ -206,6 +206,37 @@ class AiogramGateway:
             ),
         )
 
+    async def send_moderation_review(
+        self, chat_id: int, reply_to_message_id: int, event_id: int
+    ) -> int:
+        """Post an admin-only decision card while keeping the source message visible."""
+        message = await self.bot.send_message(
+            chat_id,
+            "⚠️ 疑似广告，等待管理员处理。",
+            reply_to_message_id=reply_to_message_id,
+            reply_markup=InlineKeyboardMarkup(
+                inline_keyboard=[[
+                    InlineKeyboardButton(
+                        text="🚫 管理员确认",
+                        callback_data=f"moderation_review:ban:{event_id}",
+                    ),
+                    InlineKeyboardButton(
+                        text="✅ 管理员放行",
+                        callback_data=f"moderation_review:allow:{event_id}",
+                    ),
+                ]]
+            ),
+        )
+        return message.message_id
+
+    async def replace_moderation_review(
+        self, chat_id: int, review_message_id: int, text: str
+    ) -> None:
+        await self.bot.edit_message_text(chat_id=chat_id, message_id=review_message_id, text=text)
+
+    async def schedule_message_deletion(self, chat_id: int, message_id: int, seconds: int) -> None:
+        self._schedule_message_deletion(chat_id, message_id, seconds)
+
     async def release_member(self, chat_id: int, user_id: int) -> None:
         from aiogram.types import ChatPermissions
 
