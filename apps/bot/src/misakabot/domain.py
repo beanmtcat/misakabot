@@ -85,6 +85,9 @@ class SuspicionSignals:
     is_suspicious: bool
     score: int
     reasons: tuple[str, ...]
+    # Routing-only signal: it asks the model to interpret a possible commercial
+    # relationship, but is never sufficient to delete a message or ban a member.
+    requires_semantic_review: bool = False
 
 
 @dataclass(frozen=True)

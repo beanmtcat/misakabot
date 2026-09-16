@@ -7,7 +7,7 @@ from .domain import Action, MessageInput, ModerationOutcome, ReviewStatus
 from .llm import ModerationClient
 from .normalizer import normalize_message
 from .repository import AuditRepository
-from .signals import ALLOWED_VPS_TRADE_REASON, FORCED_FIRST_OBSERVED_REASON, detect_suspicion
+from .signals import FORCED_FIRST_OBSERVED_REASON, detect_suspicion
 from .telegram_gateway import TelegramGateway
 
 logger = logging.getLogger(__name__)
@@ -48,32 +48,6 @@ class ModerationService:
                 score=max(signals.score, 1),
                 reasons=(*signals.reasons, FORCED_FIRST_OBSERVED_REASON),
             )
-        allowed_vps_trade = ALLOWED_VPS_TRADE_REASON in signals.reasons
-        if allowed_vps_trade:
-            # Keep the promised first-message model audit, but never hide or punish a category
-            # that this group explicitly permits. Later VPS listings do not need an LLM call.
-            verdict = None
-            if force_llm_review:
-                try:
-                    verdict = await self.llm.judge(normalized, signals)
-                except Exception:
-                    logger.exception(
-                        "moderation.allowed_vps_trade_llm_failed chat_id=%s message_id=%s user_id=%s",
-                        incoming.chat_id,
-                        incoming.message_id,
-                        incoming.user_id,
-                    )
-            event_id = self.repository.record(
-                incoming, normalized, signals, verdict, Action.ALLOW, ReviewStatus.NOT_REQUIRED
-            )
-            logger.info(
-                "moderation.allowed_vps_trade chat_id=%s message_id=%s user_id=%s event_id=%s",
-                incoming.chat_id,
-                incoming.message_id,
-                incoming.user_id,
-                event_id,
-            )
-            return ModerationOutcome(Action.ALLOW, verdict, signals, event_id)
         if force_llm_review and not has_concrete_suspicion:
             # First-observed messages (notably those from members who predate this Bot) are
             # audited by Kimi without the destructive quarantine path. A model-only verdict is
@@ -88,7 +62,9 @@ class ModerationService:
                     incoming.user_id,
                 )
                 verdict = None
-            if verdict is not None and verdict.is_ad:
+            if verdict is None:
+                action, review = Action.NEEDS_REVIEW, ReviewStatus.PENDING
+            elif verdict.is_ad:
                 action, review = Action.NEEDS_REVIEW, ReviewStatus.PENDING
             else:
                 action, review = Action.ALLOW, ReviewStatus.NOT_REQUIRED
@@ -102,7 +78,7 @@ class ModerationService:
                 event_id,
             )
             return ModerationOutcome(action, verdict, signals, event_id)
-        if not signals.is_suspicious:
+        if not signals.is_suspicious and not signals.requires_semantic_review:
             event_id = self.repository.record(
                 incoming, normalized, signals, None, Action.ALLOW, ReviewStatus.NOT_REQUIRED
             )
@@ -134,7 +110,7 @@ class ModerationService:
             )
             return ModerationOutcome(Action.NEEDS_REVIEW, None, signals, event_id)
 
-        if verdict.is_ad and verdict.confidence >= self.auto_ban_threshold:
+        if verdict.is_ad and verdict.confidence >= self.auto_ban_threshold and has_concrete_suspicion:
             try:
                 await self.gateway.delete_message(incoming.chat_id, incoming.message_id)
                 await self.gateway.ban_member(incoming.chat_id, incoming.user_id)

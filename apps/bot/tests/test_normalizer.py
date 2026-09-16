@@ -1,7 +1,7 @@
 import unittest
 
 from misakabot.normalizer import normalize_message
-from misakabot.signals import ALLOWED_VPS_TRADE_REASON, detect_suspicion
+from misakabot.signals import SEMANTIC_REVIEW_REASON, detect_suspicion
 
 
 class NormalizerTests(unittest.TestCase):
@@ -72,16 +72,23 @@ class NormalizerTests(unittest.TestCase):
         self.assertIn("招工话术或收益引流", signals.reasons)
         self.assertIn("以高价值奖品作收益承诺", signals.reasons)
 
-    def test_vps_subscription_trade_is_an_allowed_context(self) -> None:
+    def test_vps_subscription_trade_is_sent_for_semantic_review(self) -> None:
         result = normalize_message("各位大佬收个闲置的带订阅的账号（LA PRO AS3 基础配置）。")
         signals = detect_suspicion(result)
         self.assertFalse(signals.is_suspicious)
-        self.assertIn(ALLOWED_VPS_TRADE_REASON, signals.reasons)
+        self.assertTrue(signals.requires_semantic_review)
+        self.assertIn(SEMANTIC_REVIEW_REASON, signals.reasons)
 
-    def test_vps_sale_with_contact_is_an_allowed_context(self) -> None:
+    def test_payment_service_offer_is_sent_for_semantic_review(self) -> None:
+        result = normalize_message("搞定 GPT-Plus、Kiro、Claude，任何都能付费")
+        signals = detect_suspicion(result)
+        self.assertTrue(signals.requires_semantic_review)
+        self.assertIn(SEMANTIC_REVIEW_REASON, signals.reasons)
+
+    def test_vps_sale_with_contact_is_sent_for_semantic_review(self) -> None:
         result = normalize_message("出售香港 VPS，月付 30，联系 @vpsseller")
         signals = detect_suspicion(result)
-        self.assertIn(ALLOWED_VPS_TRADE_REASON, signals.reasons)
+        self.assertTrue(signals.requires_semantic_review)
 
 
 if __name__ == "__main__":

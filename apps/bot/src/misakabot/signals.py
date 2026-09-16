@@ -27,12 +27,20 @@ RECRUITMENT_LURE_RE = re.compile(
     r"(?:来几(?:个|位)|勤快的(?:兄弟|姐妹|人)|跟我(?:好好)?干|来(?:跟我)?干活|带你赚)"
 )
 REWARD_GUARANTEE_RE = re.compile(r"(?:包提|保提).{0,12}(?:小米|su[\s-]?7|汽车|苹果)")
-VPS_ALLOWED_TRADE_RE = re.compile(
+TRANSACTION_CONTEXT_RE = re.compile(
     r"(?:出售|卖|出|收个?|求购|求收|转让|出租).{0,32}(?:vps|小鸡|服务器|主机|订阅|基础配置|pro|as[0-9])"
     r"|(?:vps|小鸡|服务器|主机|订阅|基础配置|pro|as[0-9]).{0,32}"
     r"(?:出售|卖|出|收个?|求购|求收|转让|出租)"
 )
-ALLOWED_VPS_TRADE_REASON = "允许的 VPS/订阅配置交易语境"
+# These patterns only select messages for semantic review.  They do not decide
+# whether a message is an advertisement: that distinction belongs to the model.
+PAYMENT_SERVICE_CONTEXT_RE = re.compile(
+    r"(?:搞定|代付|代充|代开|开通|充值|付款|支付|付费|渠道|接单).{0,32}"
+    r"(?:gpt|chatgpt|claude|kiro|订阅|会员|账号|服务|软件|任何|全网)"
+    r"|(?:gpt|chatgpt|claude|kiro|订阅|会员|账号|服务|软件).{0,32}"
+    r"(?:搞定|代付|代充|代开|开通|充值|付款|支付|付费|渠道|接单)"
+)
+SEMANTIC_REVIEW_REASON = "潜在交易或代办服务：交由语义审核"
 FORCED_FIRST_OBSERVED_REASON = "群内首次可见发言：强制大模型审核"
 PROHIBITED_CATEGORIES: dict[str, tuple[str, ...]] = {
     "account_trade": ("微信号", "抖音号", "快手号", "小红书号", "qq号", "月卡", "私人号"),
@@ -92,10 +100,11 @@ def detect_suspicion(message: NormalizedMessage, media_type: str | None = None) 
     if REWARD_GUARANTEE_RE.search(normalized):
         score += 4
         reasons.append("以高价值奖品作收益承诺")
-    if VPS_ALLOWED_TRADE_RE.search(normalized):
-        # This group explicitly permits VPS/subscription trading. Keep a policy marker in the
-        # audit context so a broad advertising classifier cannot turn it into an auto-ban.
-        reasons.append(ALLOWED_VPS_TRADE_REASON)
+    requires_semantic_review = bool(
+        TRANSACTION_CONTEXT_RE.search(normalized) or PAYMENT_SERVICE_CONTEXT_RE.search(normalized)
+    )
+    if requires_semantic_review:
+        reasons.append(SEMANTIC_REVIEW_REASON)
     if message.urls or message.mentions:
         score += 2
         reasons.append("外链或联系方式")
@@ -123,4 +132,9 @@ def detect_suspicion(message: NormalizedMessage, media_type: str | None = None) 
         or (HIGH_PAY_RE.search(normalized) and RECRUITMENT_LURE_RE.search(normalized))
         or (HIGH_PAY_RE.search(normalized) and REWARD_GUARANTEE_RE.search(normalized))
     )
-    return SuspicionSignals(is_suspicious=suspicious, score=score, reasons=tuple(reasons))
+    return SuspicionSignals(
+        is_suspicious=suspicious,
+        score=score,
+        reasons=tuple(reasons),
+        requires_semantic_review=requires_semantic_review,
+    )

@@ -178,7 +178,7 @@ class ModerationServiceTests(unittest.TestCase):
         self.assertEqual(outcome.action, Action.ALLOW)
         self.assertEqual(gateway.calls, [])
 
-    def test_allowed_vps_trade_stays_visible_on_a_model_misclassification(self) -> None:
+    def test_vps_trade_model_verdict_requires_review_not_direct_ban(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             repository = AuditRepository(Path(directory) / "audit.sqlite3")
             repository.initialize()
@@ -195,7 +195,45 @@ class ModerationServiceTests(unittest.TestCase):
                     force_llm_review=True,
                 )
             )
-        self.assertEqual(outcome.action, Action.ALLOW)
+        self.assertEqual(outcome.action, Action.NEEDS_REVIEW)
+        self.assertEqual(gateway.calls, [])
+
+    def test_semantic_payment_service_ad_requires_review_not_direct_ban(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            repository = AuditRepository(Path(directory) / "audit.sqlite3")
+            repository.initialize()
+            gateway = FakeGateway()
+            service = ModerationService(repository, gateway, IncorrectHighRiskVerdictClient())
+            outcome = asyncio.run(
+                service.moderate(
+                    MessageInput(
+                        chat_id=-1001,
+                        message_id=51,
+                        user_id=18,
+                        text="搞定 GPT-Plus、Kiro、Claude，任何都能付费",
+                    )
+                )
+            )
+        self.assertEqual(outcome.action, Action.NEEDS_REVIEW)
+        self.assertEqual(gateway.calls, [])
+
+    def test_first_observed_llm_failure_requires_review(self) -> None:
+        class FailingClient:
+            async def judge(self, message: object, signals: object) -> ModerationVerdict:
+                raise TimeoutError("provider timeout")
+
+        with tempfile.TemporaryDirectory() as directory:
+            repository = AuditRepository(Path(directory) / "audit.sqlite3")
+            repository.initialize()
+            gateway = FakeGateway()
+            service = ModerationService(repository, gateway, FailingClient())
+            outcome = asyncio.run(
+                service.moderate(
+                    MessageInput(chat_id=-1001, message_id=50, user_id=17, text="正常发言"),
+                    force_llm_review=True,
+                )
+            )
+        self.assertEqual(outcome.action, Action.NEEDS_REVIEW)
         self.assertEqual(gateway.calls, [])
 
 
