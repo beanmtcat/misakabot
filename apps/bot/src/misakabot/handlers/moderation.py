@@ -81,7 +81,12 @@ def build_moderation_router(
             callback_text = "已放行，提示将在 1 分钟后删除。"
 
         try:
-            await service.gateway.replace_moderation_review(chat_id, callback.message.message_id, replacement)
+            await service.gateway.replace_moderation_review(
+                chat_id,
+                callback.message.message_id,
+                replacement,
+                target.user_id if decision == "ban" else None,
+            )
             if decision == "allow":
                 await service.gateway.schedule_message_deletion(chat_id, callback.message.message_id, 60)
         except Exception:

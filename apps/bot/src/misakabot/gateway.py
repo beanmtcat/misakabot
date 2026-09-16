@@ -230,9 +230,18 @@ class AiogramGateway:
         return message.message_id
 
     async def replace_moderation_review(
-        self, chat_id: int, review_message_id: int, text: str
+        self, chat_id: int, review_message_id: int, text: str, user_id: int | None = None
     ) -> None:
-        await self.bot.edit_message_text(chat_id=chat_id, message_id=review_message_id, text=text)
+        markup = None
+        if user_id is not None:
+            markup = InlineKeyboardMarkup(
+                inline_keyboard=[[
+                    InlineKeyboardButton(text="👤 查看用户信息", callback_data=f"user_info:{user_id}")
+                ]]
+            )
+        await self.bot.edit_message_text(
+            chat_id=chat_id, message_id=review_message_id, text=text, reply_markup=markup
+        )
 
     async def schedule_message_deletion(self, chat_id: int, message_id: int, seconds: int) -> None:
         self._schedule_message_deletion(chat_id, message_id, seconds)
