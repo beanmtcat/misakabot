@@ -22,8 +22,9 @@ class AdminActions:
         self.admin_user_ids = admin_user_ids
 
     async def is_authorized_admin(self, chat_id: int, user_id: int) -> bool:
-        if user_id in self.admin_user_ids:
-            return True
+        # Group moderation must be decided by administrators of that specific
+        # Telegram group.  A configured Bot operator is not an authorization
+        # bypass for a group where they are not an administrator.
         return await self.gateway.is_group_administrator(chat_id, user_id)
 
     async def perform_admin_unban(

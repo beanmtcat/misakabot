@@ -236,7 +236,7 @@ class AiogramGateway:
         if user_id is not None:
             markup = InlineKeyboardMarkup(
                 inline_keyboard=[[
-                    InlineKeyboardButton(text="👤 查看用户信息", callback_data=f"user_info:{user_id}")
+                    InlineKeyboardButton(text="查看用户信息", callback_data=f"user_info:{user_id}")
                 ]]
             )
         await self.bot.edit_message_text(
