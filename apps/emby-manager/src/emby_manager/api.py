@@ -686,8 +686,8 @@ def create_app(
         return PlainTextResponse("\n".join(await manager.series_path_lines_for_node(node_id)))
 
     @app.get(f"{APP_PREFIX}/v1/emby/series/{{series_id}}")
-    def series_detail(series_id: int, _: str = Depends(require_management_admin)) -> dict[str, object]:
-        detail = manager.series_detail(series_id)
+    async def series_detail(series_id: int, _: str = Depends(require_management_admin)) -> dict[str, object]:
+        detail = await manager.series_detail(series_id)
         if detail is None:
             raise HTTPException(status_code=404, detail="电视剧不存在或已失效")
         return detail

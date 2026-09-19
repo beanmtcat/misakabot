@@ -624,9 +624,10 @@ class LegacyEmbyRepository:
 
     def series_detail(self, series_id: int) -> dict[str, object] | None:
         return self._one(
-            '''SELECT s.id::text AS id,l.name AS library_name,s."update" AS tracking,s.themoviedb,s.quark,s.alipan,s.alias,s.lock_season,
+            '''SELECT s.id::text AS id,s.name,l.name AS library_name,n.name AS node_name,s."update" AS tracking,s.themoviedb,s.quark,s.alipan,s.alias,s.lock_season,
             s.index_name,s.path_map_override FROM dragonli_emby_series s
             LEFT JOIN dragonli_library_subfolders l ON l.seq=s.parent_id
+            LEFT JOIN dragonli_storage_nodes n ON n.seq=l.node_id
             WHERE s.id=%s AND s.isvalid=1''',
             (series_id,),
         )

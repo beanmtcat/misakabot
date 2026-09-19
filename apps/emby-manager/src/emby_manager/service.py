@@ -77,18 +77,22 @@ class EmbyManagementService:
     def ensure_tracking_schema(self) -> None:
         self._repository.ensure_tracking_schema()
 
-    async def series_path_entries_for_node(self, node_id: str) -> list[dict[str, str]]:
+    async def series_path_entries_for_node(
+        self, node_id: str, *, include_manual: bool = True,
+    ) -> list[dict[str, str]]:
         """Build transfer mappings from MoviePilot and manually linked tracked series."""
         requested_node = self._repository.canonical_storage_node(node_id)
         if not requested_node:
             return []
-        cached = self._series_path_cache.get(requested_node)
-        if cached and monotonic() - cached[0] < _PATH_MAP_CACHE_SECONDS:
-            return cached[1].copy()
-        manual_targets = self._repository.series_manual_path_targets()
+        if include_manual:
+            cached = self._series_path_cache.get(requested_node)
+            if cached and monotonic() - cached[0] < _PATH_MAP_CACHE_SECONDS:
+                return cached[1].copy()
+        manual_targets = self._repository.series_manual_path_targets() if include_manual else []
         cloud_targets = self._repository.series_cloud_path_targets()
         if not manual_targets and not cloud_targets and not self._moviepilot_database_url:
-            self._series_path_cache[requested_node] = (monotonic(), [])
+            if include_manual:
+                self._series_path_cache[requested_node] = (monotonic(), [])
             return []
         library_nodes = self._repository.library_nodes()
 
@@ -198,7 +202,8 @@ class EmbyManagementService:
             mapping_keys.add((entry["source_hint"], entry["destination_path"]))
             mapped_sources.add(source_hint)
         result.sort(key=lambda item: item["source_hint"])
-        self._series_path_cache[requested_node] = (monotonic(), result)
+        if include_manual:
+            self._series_path_cache[requested_node] = (monotonic(), result)
         return result.copy()
 
     async def series_path_lines_for_node(self, node_id: str) -> list[str]:
@@ -217,8 +222,23 @@ class EmbyManagementService:
     def set_series_tracking(self, series_id: int, tracking: bool) -> bool:
         return self._repository.set_series_tracking(series_id, tracking)
 
-    def series_detail(self, series_id: int) -> dict[str, object] | None:
-        return self._repository.series_detail(series_id)
+    async def series_detail(self, series_id: int) -> dict[str, object] | None:
+        detail = self._repository.series_detail(series_id)
+        if detail is None:
+            return None
+        tmdb_id = _text(detail.get("themoviedb"))
+        library_name = _text(detail.get("library_name"))
+        node_name = _transfer_node(library_name, _text(detail.get("node_name")))
+        system_mappings: list[str] = []
+        if tmdb_id and node_name:
+            entries = await self.series_path_entries_for_node(node_name, include_manual=False)
+            system_mappings = [
+                f"{entry['source_hint']}|{entry['destination_path']}"
+                for entry in entries
+                if _text(entry.get("tmdb_id")) == tmdb_id
+            ]
+        detail["system_path_mappings"] = system_mappings
+        return detail
 
     def update_series_detail(self, series_id: int, detail: Mapping[str, object]) -> bool:
         override = _text(detail.get("path_map_override"))

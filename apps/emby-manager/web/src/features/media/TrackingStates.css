@@ -22,6 +22,44 @@
   font-size: .68rem;
 }
 
+.series-form .system-path-mapping {
+  display: grid;
+  gap: 4px;
+  padding: 8px 9px;
+  border: 1px solid #2a3b4e;
+  border-radius: 7px;
+  color: #8295aa;
+  background: #0d151f;
+  font-size: .68rem;
+  line-height: 1.5;
+}
+
+.series-form .system-path-mapping b {
+  color: #9ed8bf;
+  font-weight: 600;
+}
+
+.series-form .system-path-mapping code {
+  overflow-wrap: anywhere;
+  color: #b9c9d9;
+  font-family: monospace;
+}
+
+.series-form .system-path-mapping em {
+  color: #78899d;
+  font-style: normal;
+}
+
+:root[data-theme="light"] .series-form .system-path-mapping {
+  border-color: #d9e5ed;
+  color: #687b90;
+  background: #f6f9fb;
+}
+
+:root[data-theme="light"] .series-form .system-path-mapping b { color: #28704f; }
+
+:root[data-theme="light"] .series-form .system-path-mapping code { color: #41576e; }
+
 .tracking-state-note {
   color: #dca8ae;
   font-weight: 600;
