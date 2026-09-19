@@ -5,21 +5,29 @@
 .emby-item-link{color:#e3eaf2;font-weight:700;text-decoration:none}.emby-item-link:hover{color:#78e0ba;text-decoration:underline}:root[data-theme="light"] .emby-item-link{color:#223145}:root[data-theme="light"] .emby-item-link:hover{color:#24795a}
 .movie-history-modal{width:min(1060px,100%)}.movie-history-wrap{overflow:auto}.movie-history-table{min-width:840px;width:100%;border-collapse:collapse}.movie-history-table th,.movie-history-table td{padding:11px 12px;border-bottom:1px solid #263748;text-align:left;font-size:.74rem}.movie-history-table th{color:#8fa1b5;font-weight:600}.movie-history-table td small{display:block;margin-top:3px;color:#77899c;font-size:.68rem}.movie-history-wrap .table-footer{margin-top:12px}@media(max-width:650px){.movie-history-modal{padding:18px}}:root[data-theme="light"] .movie-history-table th,:root[data-theme="light"] .movie-history-table td{border-color:#dde6ee}:root[data-theme="light"] .movie-history-table th{color:#63758a}
 
+.series-list-layout {
+  display: block;
+}
+
+.series-list-layout.has-index {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 36px;
+  align-items: start;
+  gap: 9px;
+}
+
 .series-index-sidebar {
-  position: fixed;
-  z-index: 4;
-  top: 50%;
-  right: max(12px, calc((100vw - 1560px) / 2));
+  position: sticky;
+  top: 18px;
   display: grid;
   gap: 2px;
-  max-height: calc(100vh - 120px);
+  max-height: calc(100vh - 36px);
   overflow-y: auto;
   padding: 5px;
   border: 1px solid #2a3b4e;
   border-radius: 9px;
   background: #101923e8;
   box-shadow: 0 10px 28px #0005;
-  transform: translateY(-50%);
   scrollbar-width: none;
 }
 
@@ -42,6 +50,12 @@
   background: #78e0ba !important;
 }
 
+.series-index-sidebar button.active {
+  color: #122b25 !important;
+  background: #78e0ba !important;
+  box-shadow: inset 0 0 0 1px #aaf1d3;
+}
+
 tbody tr[data-series-index] { scroll-margin-top: 18px; }
 
 :root[data-theme="light"] .series-index-sidebar {
@@ -57,4 +71,13 @@ tbody tr[data-series-index] { scroll-margin-top: 18px; }
   background: #dff5ea !important;
 }
 
-@media (max-width: 980px) { .series-index-sidebar { display: none; } }
+:root[data-theme="light"] .series-index-sidebar button.active {
+  color: #15513d !important;
+  background: #dff5ea !important;
+  box-shadow: inset 0 0 0 1px #a5dbc5;
+}
+
+@media (max-width: 980px) {
+  .series-list-layout.has-index { display: block; }
+  .series-index-sidebar { display: none; }
+}

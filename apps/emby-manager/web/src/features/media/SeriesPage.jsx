@@ -91,6 +91,7 @@ export default function SeriesPage({ notify, archived = false }) {
   const [syncing, setSyncing] = useState(false);
   const [syncMessage, setSyncMessage] = useState(null);
   const [syncingId, setSyncingId] = useState(null);
+  const [activeIndex, setActiveIndex] = useState('');
 
   async function loadSyncStatus() {
     try {
@@ -205,6 +206,7 @@ export default function SeriesPage({ notify, archived = false }) {
   }
 
   function jumpToIndex(letter) {
+    setActiveIndex(letter);
     document.querySelector(`[data-series-index="${letter}"]`)?.scrollIntoView({ behavior: 'smooth', block: 'start' });
   }
 
@@ -214,19 +216,21 @@ export default function SeriesPage({ notify, archived = false }) {
   return <section className="page-section media-section">
     {!archived && <nav className="series-filter-tabs" aria-label="追更剧集筛选"><button type="button" className={!stateFilter ? 'active' : ''} onClick={() => selectDashboardState('')} aria-pressed={!stateFilter}>追更中 <b>{trackedTotal}</b></button><button type="button" className={stateFilter === 'today' ? 'active' : ''} onClick={() => selectDashboardState('today')} aria-pressed={stateFilter === 'today'}>今日更新 <b>{todayTotal}</b></button><button type="button" className={stateFilter === 'exception' ? 'active' : ''} onClick={() => selectDashboardState('exception')} aria-pressed={stateFilter === 'exception'}>更新异常 <b>{exceptionTotal}</b></button></nav>}
     <Toolbar query={query} onQuery={(value) => { setQuery(value); setPage(1); }} filter={stateFilter} onFilter={(value) => { setStateFilter(value); setPage(1); }} filterOptions={archived ? [['', '全部已归档']] : [['', '全部追更'], ['today', '今日更新'], ['exception', '更新异常']]} onRefresh={load} onSync={!archived ? syncTracking : undefined} syncing={syncing} syncLabel={trackingEnabled || moviepilotEnabled ? '同步追更' : '同步剧集'} searchPlaceholder={`搜索${sectionName}电视剧`} />
-    <DataTable headers={['剧集', '节点 / 媒体库', '当前季', '本服 / 官方已播', '更新日期', '操作']} empty={series.length === 0} loading={loading}>
-      {series.map((item) => <tr key={item.id} className={rowStateClass(item)} data-series-index={seriesIndexLetter(item) || undefined}>
-        <td>{Number(item.id) > 0 && item.server_id ? <a className="emby-item-link" href={embyItemUrl(item.id, item.server_id)} target="_blank" rel="noreferrer">{seriesTitle(item)}</a> : <strong>{seriesTitle(item)}</strong>}<small>{item.index_name || '—'} · ID {item.id}{item.themoviedb ? ` · TMDB ${item.themoviedb}` : ''}</small></td>
-        <td><span className={`node-state ${item.node_status === 1 ? 'online' : ''}`}><i />{item.node_name}</span><small>{item.library_name}</small></td>
-        <td><span className="episode-count">{item.season || (item.season_number ? `第 ${item.season_number} 季` : '季数未知')}</span><small>{item.total ? `官方共 ${item.total} 集 · 本服 ${item.episode_count || 0} 集` : `本服 ${item.episode_count || 0} 集`}</small></td>
-        <td><button className="table-link" onClick={() => openComparison(item)}>{updateState(item)}</button><small>点击查看逐集对比</small></td>
-        <td>{formatDate(item.next_update)}{trackingStateNotes(item).map((note) => <small key={note} className="tracking-state-note">{note}</small>)}<small>同步 {formatTime(item.mtime)}</small></td>
-        <td className="action-cell"><div className="series-actions">{Number(item.id) > 0 && item.server_id && <button className="secondary compact" onClick={() => syncOneSeries(item)} disabled={Boolean(syncingId) || syncing}>{String(syncingId) === String(item.id) ? '同步中…' : '同步'}</button>}<button className="secondary compact" onClick={() => openSettings(item)} disabled={Boolean(syncingId) || syncing}>设置</button>{item.alipan && <a className="cloud-link" href={item.alipan} target="_blank" rel="noreferrer">阿里</a>}{item.quark && <a className="cloud-link quark" href={item.quark} target="_blank" rel="noreferrer">夸克</a>}</div></td>
-      </tr>)}
-    </DataTable>
-    {!archived && indexLetters.length > 0 && <nav className="series-index-sidebar" aria-label="按剧集首字母快速定位">
-      {indexLetters.map((letter) => <button key={letter} type="button" onClick={() => jumpToIndex(letter)} aria-label={`定位到 ${letter} 开头的剧集`}>{letter}</button>)}
-    </nav>}
+    <div className={`series-list-layout ${!archived && indexLetters.length > 0 ? 'has-index' : ''}`}>
+      <DataTable headers={['剧集', '节点 / 媒体库', '当前季', '本服 / 官方已播', '更新日期', '操作']} empty={series.length === 0} loading={loading}>
+        {series.map((item) => <tr key={item.id} className={rowStateClass(item)} data-series-index={seriesIndexLetter(item) || undefined}>
+          <td>{Number(item.id) > 0 && item.server_id ? <a className="emby-item-link" href={embyItemUrl(item.id, item.server_id)} target="_blank" rel="noreferrer">{seriesTitle(item)}</a> : <strong>{seriesTitle(item)}</strong>}<small>{item.index_name || '—'} · ID {item.id}{item.themoviedb ? ` · TMDB ${item.themoviedb}` : ''}</small></td>
+          <td><span className={`node-state ${item.node_status === 1 ? 'online' : ''}`}><i />{item.node_name}</span><small>{item.library_name}</small></td>
+          <td><span className="episode-count">{item.season || (item.season_number ? `第 ${item.season_number} 季` : '季数未知')}</span><small>{item.total ? `官方共 ${item.total} 集 · 本服 ${item.episode_count || 0} 集` : `本服 ${item.episode_count || 0} 集`}</small></td>
+          <td><button className="table-link" onClick={() => openComparison(item)}>{updateState(item)}</button><small>点击查看逐集对比</small></td>
+          <td>{formatDate(item.next_update)}{trackingStateNotes(item).map((note) => <small key={note} className="tracking-state-note">{note}</small>)}<small>同步 {formatTime(item.mtime)}</small></td>
+          <td className="action-cell"><div className="series-actions">{Number(item.id) > 0 && item.server_id && <button className="secondary compact" onClick={() => syncOneSeries(item)} disabled={Boolean(syncingId) || syncing}>{String(syncingId) === String(item.id) ? '同步中…' : '同步'}</button>}<button className="secondary compact" onClick={() => openSettings(item)} disabled={Boolean(syncingId) || syncing}>设置</button>{item.alipan && <a className="cloud-link" href={item.alipan} target="_blank" rel="noreferrer">阿里</a>}{item.quark && <a className="cloud-link quark" href={item.quark} target="_blank" rel="noreferrer">夸克</a>}</div></td>
+        </tr>)}
+      </DataTable>
+      {!archived && indexLetters.length > 0 && <nav className="series-index-sidebar" aria-label="按剧集首字母快速定位">
+        {indexLetters.map((letter) => <button key={letter} type="button" className={activeIndex === letter ? 'active' : ''} onClick={() => jumpToIndex(letter)} aria-label={`定位到 ${letter} 开头的剧集`} aria-current={activeIndex === letter ? 'true' : undefined}>{letter}</button>)}
+      </nav>}
+    </div>
     {archived ? <TableFooter total={total} page={page} pageSize={PAGE_SIZE} lastSyncedAt={lastSyncedAt} statusText="已归档剧集不会参与自动追更" onPageChange={setPage} /> : <p className={`series-sync-status ${syncing ? 'syncing' : ''}`}>{syncing && <span className="sync-indicator" />}共 {total} 部追更剧集 · 已关联 {episodeCount} 个单集 · {syncMessage || `上次同步 ${formatTime(lastSyncedAt)}`}{trackingEnabled === false && moviepilotEnabled === false ? ' · 未配置 TMDB 或 MoviePilot' : ''}</p>}
     {editing && <Dialog title={`设置 · ${editing.name}`} onClose={() => !saving && setEditing(null)}><form className="series-form" onSubmit={saveSettings}>
       <label className="check-field"><input type="checkbox" checked={Boolean(editing.tracking)} onChange={(event) => setEditing({ ...editing, tracking: event.target.checked })} />追更</label>
