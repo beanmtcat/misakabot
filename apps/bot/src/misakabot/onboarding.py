@@ -117,6 +117,7 @@ class OnboardingService:
     GROUP_CHALLENGE_FAILURE_TEXT = "❌ 入群二次验证未通过\n\n该用户已被移出群组。"
     INITIAL_VERIFICATION_TIMEOUT_TEXT = "⌛ 入群申请已超时\n\n该用户未在规定时间内完成安全验证，申请已自动拒绝。"
     INITIAL_VERIFICATION_FAILURE_TEXT = "❌ 入群申请验证失败\n\n该用户未通过安全验证，申请已自动拒绝。"
+    STALE_INITIAL_VERIFICATION_TEXT = "此验证会话已失效，请在 Telegram 私聊中点击最新的“开始安全验证”按钮。"
     MANUAL_JOIN_WELCOME_TEXT = (
         "✅ 管理员已批准入群申请\n\n"
         "欢迎加入群组。请完成下方 VPS 交易安全二次验证；完成前暂不能发言。"
@@ -297,7 +298,7 @@ class OnboardingService:
         joined = self.repository.consume_verification(token_hash, telegram_user_id, now)
         if joined is None:
             logger.warning("onboarding.verification_rejected user_id=%s", telegram_user_id)
-            return JoinVerificationOutcome(False, OnboardingState.DECLINED, "验证已过期或不属于当前账号")
+            return JoinVerificationOutcome(False, OnboardingState.DECLINED, self.STALE_INITIAL_VERIFICATION_TEXT)
         chat_id, user_id, verification_flow = joined
         try:
             if verification_flow == "join_request":
@@ -335,6 +336,11 @@ class OnboardingService:
             True,
             OnboardingState.SECONDARY_VERIFICATION_PENDING,
             "第一阶段验证通过。请在群内完成 VPS 交易安全验证。",
+        )
+
+    def has_current_initial_verification(self, token: str, telegram_user_id: int) -> bool:
+        return self.repository.has_current_initial_verification(
+            self._token_hash(token), telegram_user_id, datetime.now(timezone.utc).isoformat(),
         )
 
     async def fail_initial_verification(

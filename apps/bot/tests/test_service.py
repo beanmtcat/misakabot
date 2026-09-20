@@ -41,7 +41,7 @@ class IncorrectHighRiskVerdictClient:
 
 
 class ModerationServiceTests(unittest.TestCase):
-    def test_ad_is_deleted_and_banned_on_first_message(self) -> None:
+    def test_ad_requires_administrator_approval_before_ban(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             repository = AuditRepository(Path(directory) / "audit.sqlite3")
             repository.initialize()
@@ -57,8 +57,8 @@ class ModerationServiceTests(unittest.TestCase):
                     )
                 )
             )
-        self.assertEqual(outcome.action, Action.PERMANENT_BAN)
-        self.assertEqual([call[0] for call in gateway.calls], ["delete", "ban", "notice"])
+        self.assertEqual(outcome.action, Action.NEEDS_REVIEW)
+        self.assertEqual(gateway.calls, [])
 
     def test_normal_message_is_allowed(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -91,11 +91,8 @@ class ModerationServiceTests(unittest.TestCase):
                     )
                 )
             )
-        self.assertIn(outcome.action, {Action.NEEDS_REVIEW, Action.PERMANENT_BAN})
-        if outcome.action is Action.PERMANENT_BAN:
-            self.assertEqual([call[0] for call in gateway.calls], ["delete", "ban", "notice"])
-        else:
-            self.assertEqual(gateway.calls, [])
+        self.assertEqual(outcome.action, Action.NEEDS_REVIEW)
+        self.assertEqual(gateway.calls, [])
 
     def test_rule_hit_that_kimi_clears_keeps_message_visible(self) -> None:
         class ClearedByKimiClient:

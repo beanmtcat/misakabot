@@ -167,6 +167,18 @@ class OnboardingServiceTests(unittest.TestCase):
         self.assertFalse(outcome.accepted)
         self.assertEqual(self.gateway.approved, [])
 
+    def test_previous_first_stage_session_is_reported_before_turnstile(self) -> None:
+        old_pending = asyncio.run(self.service.start(self.request))
+        old_token = parse_qs(urlparse(old_pending.callback_data or "").query)["session"][0]
+        latest_pending = asyncio.run(self.service.start(self.request))
+        latest_token = parse_qs(urlparse(latest_pending.callback_data or "").query)["session"][0]
+
+        self.assertFalse(self.service.has_current_initial_verification(old_token, 42))
+        self.assertTrue(self.service.has_current_initial_verification(latest_token, 42))
+        outcome = asyncio.run(self.service.verify_token(old_token, 42))
+        self.assertFalse(outcome.accepted)
+        self.assertEqual(outcome.reason, OnboardingService.STALE_INITIAL_VERIFICATION_TEXT)
+
     def test_failed_first_stage_rejects_request_and_posts_a_group_notice(self) -> None:
         pending = asyncio.run(self.service.start(self.request))
         token = parse_qs(urlparse(pending.callback_data or "").query)["session"][0]

@@ -91,7 +91,6 @@ async def run_bot(settings: Settings) -> None:
         repository=repository,
         gateway=gateway,
         llm=build_moderation_client(settings),
-        auto_ban_threshold=settings.auto_ban_threshold,
         review_threshold=settings.review_threshold,
     )
     onboarding = OnboardingService(
@@ -163,4 +162,3 @@ def run_audit_api() -> None:
         port=settings.audit_api_port,
         access_log=True,
     )
-

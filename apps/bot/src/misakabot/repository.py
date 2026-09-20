@@ -933,6 +933,26 @@ class AuditRepository:
             connection.commit()
         return int(row[0]), int(row[1]), str(row[2])
 
+    def has_current_initial_verification(
+        self, token_hash: str, telegram_user_id: int, now: str,
+    ) -> bool:
+        """Check a first-stage session without consuming its one-time token."""
+        with closing(self._connect()) as connection:
+            row = connection.execute(
+                """
+                SELECT 1 FROM member_onboarding
+                WHERE verification_token_hash=%s AND user_id=%s
+                  AND state=%s AND verification_flow=%s
+                  AND verification_expires_at > %s
+                """,
+                (
+                    token_hash, telegram_user_id,
+                    OnboardingState.VERIFICATION_PENDING.value,
+                    "join_request", now,
+                ),
+            ).fetchone()
+        return row is not None
+
     def pending_initial_verification(
         self, token_hash: str, telegram_user_id: int
     ) -> tuple[int, int] | None:

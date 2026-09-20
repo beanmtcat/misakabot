@@ -20,13 +20,11 @@ class ModerationService:
         repository: AuditRepository,
         gateway: TelegramGateway,
         llm: ModerationClient,
-        auto_ban_threshold: float = 0.90,
         review_threshold: float = 0.60,
     ) -> None:
         self.repository = repository
         self.gateway = gateway
         self.llm = llm
-        self.auto_ban_threshold = auto_ban_threshold
         self.review_threshold = review_threshold
 
     async def moderate(
@@ -110,31 +108,10 @@ class ModerationService:
             )
             return ModerationOutcome(Action.NEEDS_REVIEW, None, signals, event_id)
 
-        if verdict.is_ad and verdict.confidence >= self.auto_ban_threshold and has_concrete_suspicion:
-            try:
-                await self.gateway.delete_message(incoming.chat_id, incoming.message_id)
-                await self.gateway.ban_member(incoming.chat_id, incoming.user_id)
-            except Exception:
-                logger.exception(
-                    "moderation.confirmed_ad_action_failed chat_id=%s message_id=%s user_id=%s",
-                    incoming.chat_id,
-                    incoming.message_id,
-                    incoming.user_id,
-                )
-                action, review = Action.NEEDS_REVIEW, ReviewStatus.PENDING
-            else:
-                self.repository.block_user(incoming.user_id, verdict.reason, incoming.sent_at.isoformat())
-                try:
-                    await self.gateway.send_moderation_notice(incoming.chat_id, incoming.user_id)
-                except Exception:
-                    logger.exception(
-                        "moderation.notice_action_failed chat_id=%s message_id=%s user_id=%s",
-                        incoming.chat_id,
-                        incoming.message_id,
-                        incoming.user_id,
-                    )
-                action, review = Action.PERMANENT_BAN, ReviewStatus.CONFIRMED
-        elif verdict.is_ad and verdict.confidence >= self.review_threshold:
+        # Kimi only classifies the message. It never deletes or bans a member:
+        # every advertising verdict that meets the review threshold is sent to
+        # the in-group administrator approval card.
+        if verdict.is_ad and verdict.confidence >= self.review_threshold:
             action, review = Action.NEEDS_REVIEW, ReviewStatus.PENDING
         else:
             action, review = Action.ALLOW, ReviewStatus.NOT_REQUIRED

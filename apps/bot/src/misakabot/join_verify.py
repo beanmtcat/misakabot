@@ -105,7 +105,22 @@ const status = document.getElementById('status');
 const session = new URLSearchParams(location.search).get('session');
 const webApp = window.Telegram && window.Telegram.WebApp;
 webApp && webApp.ready(); webApp && webApp.expand();
+let sessionReady = false;
 function show(message, kind) {{ status.textContent = message; status.className = `status ${{kind || ''}}`; }}
+async function prepareSession() {{
+  if (!session || !webApp || !webApp.initData) {{ show('请从 Telegram 的验证按钮打开此页面。', 'error'); return; }}
+  show('正在确认验证会话…');
+  try {{
+    const response = await fetch('/join-verify/api/session-status', {{
+      method: 'POST', headers: {{'Content-Type': 'application/json'}},
+      body: JSON.stringify({{session_token: session, init_data: webApp.initData}})
+    }});
+    const result = await response.json();
+    if (!response.ok) throw new Error(result.detail || '验证会话无效');
+    sessionReady = true;
+    render();
+  }} catch (error) {{ show(error.message || '验证会话无效，请重新打开最新验证按钮。', 'error'); }}
+}}
 async function complete(turnstileToken) {{
   if (!session || !webApp || !webApp.initData) {{ show('请从 Telegram 的验证按钮打开此页面。', 'error'); return; }}
   show('正在验证身份…');
@@ -121,7 +136,7 @@ async function complete(turnstileToken) {{
   }} catch (error) {{ show(error.message || '验证失败，请重试。', 'error'); }}
 }}
 function render() {{
-  if (!session) {{ show('验证链接无效。', 'error'); return; }}
+  if (!sessionReady) return;
   if (!window.turnstile || typeof window.turnstile.render !== 'function') {{
     setTimeout(render, 100);
     return;
@@ -138,9 +153,9 @@ function render() {{
     show(`验证服务初始化失败${{reason}}。请检查 Site Key、域名配置和小组件模式。`, 'error');
   }}
 }}
-render();
+prepareSession();
 setTimeout(() => {{
-  if (!window.turnstile || typeof window.turnstile.render !== 'function') {{
+  if (sessionReady && (!window.turnstile || typeof window.turnstile.render !== 'function')) {{
     show(window.turnstileScriptFailed
       ? '验证脚本加载失败。请检查当前网络能否访问 challenges.cloudflare.com。'
       : '无法加载验证服务。请检查当前网络能否访问 challenges.cloudflare.com。', 'error');

@@ -25,7 +25,6 @@ class Settings:
     join_verify_url: str = ""
     turnstile_site_key: str = ""
     turnstile_secret_key: str = ""
-    auto_ban_threshold: float = 0.90
     review_threshold: float = 0.60
     llm_mode: str = "rule_based"
     llm_api_base_url: str = ""
@@ -73,7 +72,6 @@ class Settings:
             join_verify_url=join_verify_url,
             turnstile_site_key=os.environ.get("TURNSTILE_SITE_KEY", ""),
             turnstile_secret_key=os.environ.get("TURNSTILE_SECRET_KEY", ""),
-            auto_ban_threshold=float(os.environ.get("AUTO_BAN_THRESHOLD", "0.90")),
             review_threshold=float(os.environ.get("REVIEW_THRESHOLD", "0.60")),
             llm_mode=os.environ.get("LLM_MODE", "rule_based"),
             llm_api_base_url=os.environ.get("LLM_API_BASE_URL", ""),

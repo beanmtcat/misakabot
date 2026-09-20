@@ -32,6 +32,11 @@ class JoinVerifySubmission(BaseModel):
     init_data: str
     turnstile_token: str
 
+
+class JoinVerifySessionCheck(BaseModel):
+    session_token: str
+    init_data: str
+
 def build_webhook_app(
     settings: Settings,
     bot: Bot,
@@ -122,6 +127,22 @@ def build_webhook_app(
             if not settings.turnstile_site_key:
                 raise HTTPException(status_code=503, detail="Turnstile is not configured")
             return HTMLResponse(join_verify_page(settings.turnstile_site_key))
+
+        @app.post("/join-verify/api/session-status", include_in_schema=False)
+        async def check_join_verify_session(submission: JoinVerifySessionCheck) -> dict[str, bool]:
+            try:
+                identity = verify_init_data(submission.init_data, settings.telegram_bot_token)
+            except InitDataError as error:
+                logger.warning("join_verify.session_invalid_init_data reason=%s", error)
+                raise HTTPException(status_code=401, detail="Telegram 身份校验失败") from error
+            if not onboarding.has_current_initial_verification(
+                submission.session_token, identity.user_id,
+            ):
+                raise HTTPException(
+                    status_code=409,
+                    detail=OnboardingService.STALE_INITIAL_VERIFICATION_TEXT,
+                )
+            return {"ok": True}
 
         @app.post("/join-verify/api/complete", include_in_schema=False)
         async def complete_join_verify(submission: JoinVerifySubmission, request: Request) -> dict[str, object]:
