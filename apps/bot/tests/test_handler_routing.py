@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from datetime import datetime, timezone
 from pathlib import Path
-from unittest.mock import AsyncMock
+from unittest.mock import AsyncMock, Mock
 
 from aiogram import Bot
 from aiogram.client.session.base import BaseSession
@@ -41,6 +41,7 @@ class HandlerRoutingTests(unittest.IsolatedAsyncioTestCase):
         self.service.moderate = AsyncMock(return_value=ModerationOutcome(
             Action.ALLOW, None, detect_suspicion(normalize_message("你好")), 1,
         ))
+        self.service.record_administrator_message = Mock(return_value=2)
         self.onboarding = OnboardingService(self.repository, self.gateway)
         self.onboarding.start_direct_join = AsyncMock()
         self.onboarding.start = AsyncMock()
@@ -113,6 +114,7 @@ class HandlerRoutingTests(unittest.IsolatedAsyncioTestCase):
         self.gateway.is_group_administrator.return_value = True
         await self.feed_message("@TestBot 你好")
         self.service.moderate.assert_not_awaited()
+        self.service.record_administrator_message.assert_called_once()
         self.client.reply.assert_awaited_once()
 
     async def test_unaddressed_message_is_reviewed_without_ai_reply(self) -> None:

@@ -45,17 +45,28 @@ def build_message_router(
             or message.chat.id not in allowed_group_ids
         ):
             return
+        incoming = MessageInput(
+            chat_id=message.chat.id,
+            message_id=message.message_id,
+            user_id=message.from_user.id,
+            username=message.from_user.username,
+            display_name=message.from_user.full_name,
+            text=message.text or message.caption or "",
+            media_type=message.content_type if message.content_type != "text" else None,
+        )
         is_group_admin = False
         try:
             is_group_admin = await service.gateway.is_group_administrator(
                 message.chat.id, message.from_user.id
             )
             if is_group_admin:
+                event_id = service.record_administrator_message(incoming)
                 logger.info(
-                    "message.moderation_skipped_group_admin chat_id=%s message_id=%s user_id=%s",
+                    "message.administrator_recorded chat_id=%s message_id=%s user_id=%s event_id=%s",
                     message.chat.id,
                     message.message_id,
                     message.from_user.id,
+                    event_id,
                 )
         except Exception:
             # Failing open is deliberate: an unknown administrator must never be
@@ -81,15 +92,7 @@ def build_message_router(
                 len(message.text or message.caption or ""),
             )
             outcome = await service.moderate(
-                MessageInput(
-                    chat_id=message.chat.id,
-                    message_id=message.message_id,
-                    user_id=message.from_user.id,
-                    username=message.from_user.username,
-                    display_name=message.from_user.full_name,
-                    text=message.text or message.caption or "",
-                    media_type=message.content_type if message.content_type != "text" else None,
-                ),
+                incoming,
                 force_llm_review=is_first_observed,
             )
             logger.info(

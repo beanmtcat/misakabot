@@ -26,12 +26,12 @@ type Risk = '高风险' | '中风险' | '低风险';
 type AuditEvent = {
   id: string; time: string; user: string; username: string; status: Status; risk: Risk;
   category: string; confidence: number | null; isAdvertisement: boolean | null; ruleScore: number; message: string; normalized: string;
-  evidence: string[]; source: string; action: string;
+  evidence: string[]; source: string; action: string; reviewedBy: string | null; reviewedAt: string | null;
 };
 
 type ApiEvent = {
   id: number; chat_id: number; user_id: number; username?: string | null; raw_text: string;
-  normalized_text: string; action: string; review_status: string; created_at: string;
+  normalized_text: string; action: string; review_status: string; created_at: string; reviewed_by_user_id?: number | null; reviewed_at?: string | null;
   signals?: { score?: number; reasons?: string[] } | null;
   verdict?: { is_ad?: boolean; category?: string; confidence?: number; evidence?: string[] } | null;
 };
@@ -52,6 +52,7 @@ function mapEvent(event: ApiEvent): AuditEvent {
   const confidence = typeof event.verdict?.confidence === 'number' ? event.verdict.confidence : null;
   const isAdvertisement = typeof event.verdict?.is_ad === 'boolean' ? event.verdict.is_ad : null;
   const ruleScore = event.signals?.score ?? 0;
+  const administratorRecorded = event.signals?.reasons?.includes('群管理员发言：仅记录，跳过审核') ?? false;
   const status: Status = event.action === 'permanent_ban'
     ? '已封禁'
     : event.review_status === 'false_positive' || event.action === 'release'
@@ -76,8 +77,10 @@ function mapEvent(event: ApiEvent): AuditEvent {
     message: event.raw_text || '（媒体消息）',
     normalized: event.normalized_text || '—',
     evidence: [...(event.signals?.reasons || []), ...(event.verdict?.evidence || [])],
-    source: event.verdict ? '大模型裁决' : '规则初筛',
+    source: administratorRecorded ? '群管理员发言（仅记录）' : event.verdict ? '大模型裁决' : '规则初筛',
     action: status === '已封禁' ? '删除消息 · 永久封禁' : status === '待复核' ? '等待管理员复核 · 消息保持可见' : status === '已恢复' ? '已恢复发言权限' : status === '历史隔离' ? '历史策略：消息已删除并临时禁言' : '已放行 · 未执行 Telegram 处置',
+    reviewedBy: typeof event.reviewed_by_user_id === 'number' ? `用户 ${event.reviewed_by_user_id}` : null,
+    reviewedAt: event.reviewed_at ? new Date(event.reviewed_at).toLocaleString('zh-CN', { hour12: false }) : null,
   };
 }
 
@@ -268,7 +271,7 @@ export default function Home() {
 function EventDetail({ event, onAction }: { event: AuditEvent; onAction: (status: Status, action: string) => void }) {
   const isReviewable = event.status === '待复核' || event.status === '历史隔离';
   return <div><div className="flex items-start justify-between gap-3"><div><p className="text-xs font-semibold tracking-[0.13em] text-[#6d8793]">事件详情</p><h2 className="mt-1 text-lg font-bold">{event.id}</h2></div><span className={`rounded-full px-2.5 py-1 text-xs font-bold ring-1 ring-inset ${statusStyle[event.status]}`}>{event.status}</span></div>
-    <div className="mt-5 space-y-4 text-sm"><DetailRow icon={<UserRound />} label="发送者" value={`${event.user} ${event.username}`} /><DetailRow icon={<Clock3 />} label="发生时间" value={`今天 ${event.time}`} /><DetailRow icon={<Bot />} label="判定来源" value={event.source} /><DetailRow icon={<Activity />} label={event.confidence !== null ? (event.isAdvertisement ? '广告置信度' : '非广告判断置信度') : '规则风险分'} value={event.confidence !== null ? `${Math.round(event.confidence * 100)}% · ${event.category}` : `${event.ruleScore} 分 · 未经 Kimi 判定`} /></div>
+    <div className="mt-5 space-y-4 text-sm"><DetailRow icon={<UserRound />} label="发送者" value={`${event.user} ${event.username}`} /><DetailRow icon={<Clock3 />} label="发生时间" value={`今天 ${event.time}`} /><DetailRow icon={<Bot />} label="判定来源" value={event.source} /><DetailRow icon={<Activity />} label={event.confidence !== null ? (event.isAdvertisement ? '广告置信度' : '非广告判断置信度') : '规则风险分'} value={event.confidence !== null ? `${Math.round(event.confidence * 100)}% · ${event.category}` : `${event.ruleScore} 分 · 未经 AI 判定`} />{event.reviewedBy && <DetailRow icon={<ShieldCheck />} label="处理管理员" value={`${event.reviewedBy}${event.reviewedAt ? ` · ${event.reviewedAt}` : ''}`} />}</div>
     <div className="mt-5 rounded-xl border border-[#e0e9eb] bg-[#f6f9fa] p-3.5"><p className="mb-2 text-xs font-semibold text-[#66808c]">原始消息</p><p className="text-sm leading-6 text-[#264351]">{event.message}</p><p className="mt-3 border-t border-[#e0e9eb] pt-3 text-xs leading-5 text-[#718995]">归一化：{event.normalized}</p></div>
     <div className="mt-5"><p className="mb-2 text-xs font-semibold text-[#66808c]">判定证据</p><div className="flex flex-wrap gap-2">{event.evidence.map((item) => <span key={item} className="rounded-lg bg-[#e9f5f3] px-2.5 py-1.5 text-xs font-semibold text-[#17776e]">{item}</span>)}</div></div>
     <div className="mt-5 border-t border-[#e3ebed] pt-4"><p className="mb-3 text-xs text-[#728b96]">当前动作：{event.action}</p>{isReviewable ? <div className="grid grid-cols-2 gap-2"><Button variant="outline" onClick={() => onAction('已恢复', '解除限制 · 标记为误封')} className="border-[#b9d3d4] text-[#23626a]"><X />误封恢复</Button><Button onClick={() => onAction('已封禁', '删除消息 · 永久封禁')} className="bg-[#c94656] text-white hover:bg-[#b83e4d]"><Check />确认封禁</Button></div> : <Button variant="outline" className="w-full border-[#d6e0e4] text-[#456070]"><Link2 />复制事件编号</Button>}</div>

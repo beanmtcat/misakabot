@@ -5,6 +5,7 @@ import tempfile
 import time
 import unittest
 from datetime import datetime, timezone
+from pathlib import Path
 from urllib.parse import urlencode
 
 from fastapi.testclient import TestClient
@@ -182,6 +183,8 @@ class AuditApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(gateway.calls, [("ban", -1, 8, 9)])
         self.assertEqual(stored["action"], "permanent_ban")
+        self.assertEqual(stored["reviewed_by_user_id"], 1)
+        self.assertIsNotNone(stored["reviewed_at"])
         self.assertTrue(is_blocked)
 
     def test_review_action_does_not_update_audit_when_telegram_fails(self) -> None:

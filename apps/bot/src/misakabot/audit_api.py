@@ -166,7 +166,8 @@ def create_app(
         where = f"WHERE {' AND '.join(clauses)}" if clauses else ""
         sql = f"""
             SELECT id, chat_id, message_id, user_id, username, raw_text, normalized_text,
-                   urls_json, signals_json, verdict_json, action, review_status, created_at, updated_at
+                   urls_json, signals_json, verdict_json, action, review_status,
+                   reviewed_by_user_id, reviewed_at, created_at, updated_at
             FROM moderation_events {where}
             ORDER BY id DESC LIMIT %s
         """
@@ -287,9 +288,11 @@ def _update_review(
     action: str,
     admin: TelegramIdentity,
 ) -> dict[str, object]:
+    reviewed_at = datetime.now(timezone.utc).isoformat()
     updated = repository.execute_write(
-        "UPDATE moderation_events SET review_status=%s, action=%s, updated_at=%s WHERE id=%s AND chat_id=%s",
-        (review_status, action, datetime.now(timezone.utc).isoformat(), event_id, chat_id),
+        """UPDATE moderation_events SET review_status=%s, action=%s,
+        reviewed_by_user_id=%s, reviewed_at=%s, updated_at=%s WHERE id=%s AND chat_id=%s""",
+        (review_status, action, admin.user_id, reviewed_at, reviewed_at, event_id, chat_id),
     )
     if updated != 1:
         raise HTTPException(status_code=404, detail="Audit event not found")

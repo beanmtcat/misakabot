@@ -122,3 +122,18 @@ class ModerationService:
             verdict.confidence, verdict.category, event_id,
         )
         return ModerationOutcome(action, verdict, signals, event_id)
+
+    def record_administrator_message(self, incoming: MessageInput) -> int:
+        """Keep an audit trail for group administrators without moderating them."""
+        sender_identity = " ".join(
+            part for part in (incoming.display_name, incoming.username) if part
+        )
+        normalized = normalize_message(incoming.text, sender_name=sender_identity)
+        signals = detect_suspicion(normalized, incoming.media_type)
+        signals = replace(
+            signals,
+            reasons=(*signals.reasons, "群管理员发言：仅记录，跳过审核"),
+        )
+        return self.repository.record(
+            incoming, normalized, signals, None, Action.ALLOW, ReviewStatus.NOT_REQUIRED,
+        )
