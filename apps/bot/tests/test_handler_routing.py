@@ -55,14 +55,14 @@ class HandlerRoutingTests(unittest.IsolatedAsyncioTestCase):
         await self.bot.session.close()
         self.directory.cleanup()
 
-    async def test_review_card_reason_prefers_kimi_verdict(self) -> None:
+    async def test_review_card_reason_prefers_ai_verdict(self) -> None:
         outcome = ModerationOutcome(
             Action.NEEDS_REVIEW,
             ModerationVerdict(True, "account_trade", 0.92, (), "持续提供账号代付服务"),
             detect_suspicion(normalize_message("代付")),
             1,
         )
-        self.assertEqual(review_reason(outcome), "Kimi 判定「account_trade」92%：持续提供账号代付服务")
+        self.assertEqual(review_reason(outcome), "AI 判定「account_trade」92%：持续提供账号代付服务")
 
     async def feed_message(self, text: str, *, chat_id: int = -100, **extra: object) -> None:
         message = {

@@ -21,7 +21,7 @@ def review_reason(outcome: object) -> str:
         reason = " ".join(str(verdict.reason).split())[:180]
         confidence = round(float(getattr(verdict, "confidence", 0)) * 100)
         category = " ".join(str(getattr(verdict, "category", "广告")).split())[:40] or "广告"
-        return f"Kimi 判定「{category}」{confidence}%：{reason}"
+        return f"AI 判定「{category}」{confidence}%：{reason}"
     signals = getattr(outcome, "signals", None)
     reasons = getattr(signals, "reasons", ()) if signals is not None else ()
     detail = "；".join(" ".join(str(reason).split()) for reason in reasons if reason)[:180]
