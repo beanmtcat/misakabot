@@ -207,12 +207,12 @@ class AiogramGateway:
         )
 
     async def send_moderation_review(
-        self, chat_id: int, reply_to_message_id: int, event_id: int
+        self, chat_id: int, reply_to_message_id: int, event_id: int, reason: str
     ) -> int:
         """Post an admin-only decision card while keeping the source message visible."""
         message = await self.bot.send_message(
             chat_id,
-            "⚠️ 疑似广告，等待管理员处理。",
+            f"⚠️ 疑似广告，等待管理员处理。\n原因：{reason}",
             reply_to_message_id=reply_to_message_id,
             reply_markup=InlineKeyboardMarkup(
                 inline_keyboard=[[

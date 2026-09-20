@@ -14,6 +14,20 @@ logger = logging.getLogger(__name__)
 logger.addHandler(logging.NullHandler())
 
 
+def review_reason(outcome: object) -> str:
+    """Format a concise operator-facing reason without repeating the source post."""
+    verdict = getattr(outcome, "verdict", None)
+    if verdict is not None and getattr(verdict, "reason", ""):
+        reason = " ".join(str(verdict.reason).split())[:180]
+        confidence = round(float(getattr(verdict, "confidence", 0)) * 100)
+        category = " ".join(str(getattr(verdict, "category", "广告")).split())[:40] or "广告"
+        return f"Kimi 判定「{category}」{confidence}%：{reason}"
+    signals = getattr(outcome, "signals", None)
+    reasons = getattr(signals, "reasons", ()) if signals is not None else ()
+    detail = "；".join(" ".join(str(reason).split()) for reason in reasons if reason)[:180]
+    return f"规则初筛：{detail or '需要管理员人工判断'}"
+
+
 def build_message_router(
     service: ModerationService,
     onboarding: OnboardingService,
@@ -88,7 +102,7 @@ def build_message_router(
             if outcome.action is Action.NEEDS_REVIEW and outcome.event_id is not None:
                 try:
                     review_message_id = await service.gateway.send_moderation_review(
-                        message.chat.id, message.message_id, outcome.event_id
+                        message.chat.id, message.message_id, outcome.event_id, review_reason(outcome)
                     )
                     service.repository.set_moderation_review_message(
                         outcome.event_id, message.chat.id, review_message_id

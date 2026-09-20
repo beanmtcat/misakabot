@@ -23,7 +23,7 @@ class TelegramGateway(Protocol):
     async def send_moderation_notice(self, chat_id: int, user_id: int) -> None: ...
 
     async def send_moderation_review(
-        self, chat_id: int, reply_to_message_id: int, event_id: int
+        self, chat_id: int, reply_to_message_id: int, event_id: int, reason: str
     ) -> int: ...
 
     async def replace_moderation_review(
