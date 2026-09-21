@@ -82,18 +82,24 @@ class AiogramGateway:
         """Use Telegram's native profile deep link, with an admin-only fallback.
 
         `tg://user?id=...` is the only Bot API URL that asks Telegram to open a
-        user's native profile. It can be unavailable once a member has been removed,
-        so the callback remains available to inspect the recorded account details.
+        user's native profile. Telegram rejects this URL for users who disable
+        profile links, and rejects the *entire message* with
+        ``BUTTON_USER_PRIVACY_RESTRICTED``. Use the existing admin-only callback
+        in that case so onboarding messages can still be delivered.
         """
         normalized_username = (username or "").removeprefix("@").strip()
-        profile_url = (
-            f"https://t.me/{normalized_username}?profile"
-            if re.fullmatch(r"[A-Za-z0-9_]{5,}", normalized_username)
-            else f"tg://user?id={user_id}"
-        )
+        if re.fullmatch(r"[A-Za-z0-9_]{5,}", normalized_username):
+            return InlineKeyboardMarkup(
+                inline_keyboard=[[
+                    InlineKeyboardButton(
+                        text="查看用户资料",
+                        url=f"https://t.me/{normalized_username}?profile",
+                    )
+                ]]
+            )
         return InlineKeyboardMarkup(
             inline_keyboard=[
-                [InlineKeyboardButton(text="查看用户资料", url=profile_url)],
+                [InlineKeyboardButton(text="查看用户信息", callback_data=f"user_info:{user_id}")],
             ]
         )
 

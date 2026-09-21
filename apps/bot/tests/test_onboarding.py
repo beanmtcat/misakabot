@@ -324,6 +324,25 @@ class OnboardingServiceTests(unittest.TestCase):
         self.assertEqual(len(self.gateway.group_challenges), 1)
         self.assertEqual(self.repository.onboarding_state(-100123, 66), OnboardingState.SECONDARY_VERIFICATION_PENDING)
 
+    def test_startup_retries_second_stage_challenge_without_a_message(self) -> None:
+        now = datetime.now(timezone.utc)
+        self.repository.create_group_challenge(
+            chat_id=-100123,
+            user_id=67,
+            username=None,
+            token_hash="undelivered-token",
+            answer_index=0,
+            expires_at=(now + timedelta(minutes=2)).isoformat(),
+            now=now.isoformat(),
+            verification_flow="join_request",
+        )
+
+        resumed = asyncio.run(self.service.resume_undelivered_group_challenges(frozenset({-100123})))
+
+        self.assertEqual(resumed, 1)
+        self.assertEqual(len(self.gateway.group_challenges), 1)
+        self.assertEqual(self.repository.onboarding_state(-100123, 67), OnboardingState.SECONDARY_VERIFICATION_PENDING)
+
     def test_first_observed_message_is_reviewed_for_existing_members_too(self) -> None:
         observed_at = datetime.now(timezone.utc)
         # No onboarding row: this represents someone already in the group before Bot joined.

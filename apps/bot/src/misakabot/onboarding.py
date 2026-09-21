@@ -247,6 +247,35 @@ class OnboardingService:
             logger.info("onboarding.group_challenge_resumed count=%s", resumed)
         return resumed
 
+    async def resume_undelivered_group_challenges(self, allowed_group_ids: frozenset[int]) -> int:
+        """Retry active second-stage checks that have no Telegram prompt message."""
+        resumed = 0
+        now = datetime.now(timezone.utc)
+        for chat_id, user_id, username, verification_flow in self.repository.undelivered_group_challenges(
+            now.isoformat()
+        ):
+            if chat_id not in allowed_group_ids:
+                continue
+            try:
+                await self._start_group_challenge(
+                    chat_id=chat_id,
+                    user_id=user_id,
+                    username=username,
+                    verification_flow=verification_flow,
+                    started_at=now,
+                )
+            except Exception:
+                logger.exception(
+                    "onboarding.undelivered_group_challenge_resume_failed chat_id=%s user_id=%s",
+                    chat_id,
+                    user_id,
+                )
+                continue
+            resumed += 1
+        if resumed:
+            logger.info("onboarding.undelivered_group_challenges_resumed count=%s", resumed)
+        return resumed
+
     async def _start_group_challenge(
         self,
         *,

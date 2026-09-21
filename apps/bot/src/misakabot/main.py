@@ -106,6 +106,7 @@ async def run_bot(settings: Settings) -> None:
         },
     )
     await onboarding.resume_pending_direct_join_challenges(settings.allowed_group_ids)
+    await onboarding.resume_undelivered_group_challenges(settings.allowed_group_ids)
     dispatcher = build_dispatcher(
         bot,
         service,

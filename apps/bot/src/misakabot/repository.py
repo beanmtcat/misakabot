@@ -699,6 +699,27 @@ class AuditRepository:
             ).fetchall()
         return [(int(row[0]), int(row[1]), row[2]) for row in rows]
 
+    def undelivered_group_challenges(
+        self, now: str
+    ) -> list[tuple[int, int, str | None, str]]:
+        """Return active second-stage challenges whose prompt was never sent.
+
+        A Telegram API rejection can happen after the state is persisted but before
+        a group message ID is stored. Startup retries these records with a fresh,
+        bounded challenge instead of leaving the member restricted without a prompt.
+        """
+        with closing(self._connect()) as connection:
+            rows = connection.execute(
+                """
+                SELECT chat_id, user_id, username, verification_flow
+                FROM member_onboarding
+                WHERE state=%s AND verification_message_id IS NULL
+                  AND verification_expires_at > %s
+                """,
+                (OnboardingState.SECONDARY_VERIFICATION_PENDING.value, now),
+            ).fetchall()
+        return [(int(row[0]), int(row[1]), row[2], str(row[3])) for row in rows]
+
     def create_group_challenge(
         self,
         *,
