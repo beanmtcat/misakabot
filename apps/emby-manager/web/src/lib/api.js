@@ -1,8 +1,15 @@
 export const API_PREFIX = import.meta.env.VITE_API_PREFIX || '/emby-manager';
 let csrfToken = '';
+let unauthorizedHandler = null;
+let unauthorizedNotified = false;
 
 export function setCsrfToken(value) {
   csrfToken = typeof value === 'string' ? value : '';
+  if (csrfToken) unauthorizedNotified = false;
+}
+
+export function setUnauthorizedHandler(handler) {
+  unauthorizedHandler = typeof handler === 'function' ? handler : null;
 }
 
 export function embyItemUrl(itemId, serverId) {
@@ -23,6 +30,13 @@ export async function api(path, options = {}) {
   });
   if (!response.ok) {
     const body = await response.json().catch(() => ({}));
+    if (response.status === 401) {
+      csrfToken = '';
+      if (!unauthorizedNotified) {
+        unauthorizedNotified = true;
+        unauthorizedHandler?.();
+      }
+    }
     throw new Error(body.detail || `请求失败 (${response.status})`);
   }
   return response.status === 204 ? null : response.json();

@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import Login from './components/Login';
-import { api, setCsrfToken } from './lib/api';
+import { api, setCsrfToken, setUnauthorizedHandler } from './lib/api';
 import UsersPage from './features/users/UsersPage';
 import WatchLogsPage from './features/watch/WatchLogsPage';
 import LoginLogsPage from './features/login/LoginLogsPage';
@@ -43,6 +43,13 @@ function AppContent() {
   const [notice, setNotice] = useState(null);
   const [theme, setTheme] = useState(() => window.localStorage.getItem('emby-manager-theme') || 'dark');
   function notify(message, error = false) { setNotice({ message, error }); window.setTimeout(() => setNotice(null), 3000); }
+  useEffect(() => {
+    setUnauthorizedHandler(() => {
+      setCsrfToken('');
+      setUsername(false);
+    });
+    return () => setUnauthorizedHandler(null);
+  }, []);
   useEffect(() => { api('/auth/session').then((session) => { setCsrfToken(session.csrf_token); setUsername(session.username); }).catch(() => { setCsrfToken(''); setUsername(false); }); }, []);
   useEffect(() => { document.documentElement.dataset.theme = theme; window.localStorage.setItem('emby-manager-theme', theme); }, [theme]);
   useEffect(() => {
