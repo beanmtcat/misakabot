@@ -18,6 +18,7 @@ class FakeGateway:
         self.declined: list[tuple[int, int]] = []
         self.verifications: list[tuple[int, str, str | None]] = []
         self.group_challenges: list[tuple[int, int, str, tuple[tuple[str, str], ...], int]] = []
+        self.group_challenge_usernames: list[str | None] = []
         self.restricted: list[tuple[int, int, int]] = []
         self.released: list[tuple[int, int]] = []
         self.banned: list[tuple[int, int]] = []
@@ -50,6 +51,7 @@ class FakeGateway:
         ttl_minutes: int,
     ) -> int:
         self.group_challenges.append((chat_id, user_id, prompt, choices, ttl_minutes))
+        self.group_challenge_usernames.append(username)
         return 1000 + len(self.group_challenges)
 
     async def replace_group_verification_message(
@@ -148,6 +150,7 @@ class OnboardingServiceTests(unittest.TestCase):
         self.assertEqual(outcome.state, OnboardingState.SECONDARY_VERIFICATION_PENDING)
         self.assertEqual(self.gateway.approved, [(-100123, 42)])
         self.assertEqual(len(self.gateway.group_challenges), 1)
+        self.assertEqual(self.gateway.group_challenge_usernames, ["new_member"])
         self.assertEqual(self.gateway.group_challenges[-1][-1], 2)
         self.assertEqual(self.gateway.verifications[-1][2], "测试 VPS 交流群")
 

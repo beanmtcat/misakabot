@@ -350,7 +350,7 @@ class OnboardingService:
             await self._start_group_challenge(
                 chat_id=chat_id,
                 user_id=user_id,
-                username=None,
+                username=self.repository.onboarding_username(chat_id, user_id),
                 verification_flow=verification_flow,
                 started_at=datetime.now(timezone.utc),
             )
