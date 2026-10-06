@@ -82,10 +82,18 @@ def build_onboarding_router(
                     joined_at=event.date,
                 )
             )
+        elif (
+            old_status in {"member", "restricted", "administrator", "creator"}
+            and new_status == "left"
+            and not member.is_bot
+        ):
+            _ = onboarding.mark_member_departed(event.chat.id, member.id, event.date)
         logger.info(
-            "group_member_role_changed cache_invalidated chat_id=%s user_id=%s",
+            "group_member_role_changed cache_invalidated chat_id=%s user_id=%s old_status=%s new_status=%s",
             event.chat.id,
             event.new_chat_member.user.id,
+            old_status,
+            new_status,
         )
 
     @router.message(F.new_chat_members)

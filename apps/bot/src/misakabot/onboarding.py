@@ -188,9 +188,39 @@ class OnboardingService:
             request, self._token_hash(token), expires_at.isoformat()
         )
         if not verification_created:
+            current_state = self.repository.onboarding_state(request.chat_id, request.user_id)
+            # A user who left and applies again can still have a trusted state from
+            # their previous membership. Telegram's current member status separates
+            # that new application from a delayed retry of the old webhook update.
+            try:
+                still_in_group = await self.gateway.is_group_member(request.chat_id, request.user_id)
+            except Exception as error:
+                logger.warning(
+                    "onboarding.verification_retry_member_lookup_failed chat_id=%s user_id=%s state=%s reason=%s",
+                    request.chat_id,
+                    request.user_id,
+                    current_state,
+                    error,
+                )
+                still_in_group = True
+            if not still_in_group:
+                verification_created = self.repository.create_pending_verification(
+                    request,
+                    self._token_hash(token),
+                    expires_at.isoformat(),
+                    restart_existing=True,
+                )
+                if verification_created:
+                    logger.info(
+                        "onboarding.rejoin_verification_restarted chat_id=%s user_id=%s old_state=%s",
+                        request.chat_id,
+                        request.user_id,
+                        current_state,
+                    )
             # A retry of an old join-request update arrived after this member had
-            # already advanced.  Acknowledge it without sending a stale first-stage
+            # already advanced. Acknowledge it without sending a stale first-stage
             # link or regressing the persisted state.
+        if not verification_created:
             current_state = self.repository.onboarding_state(request.chat_id, request.user_id)
             logger.info(
                 "onboarding.verification_retry_ignored chat_id=%s user_id=%s state=%s",
@@ -221,6 +251,13 @@ class OnboardingService:
             request.chat_id, request.user_id, self.verification_ttl_minutes,
         )
         return PendingJoin(OnboardingState.VERIFICATION_PENDING, verification_url)
+
+    def mark_member_departed(self, chat_id: int, user_id: int, departed_at: datetime) -> bool:
+        """Forget in-group verification state when a member voluntarily leaves."""
+        changed = self.repository.mark_member_departed(chat_id, user_id, departed_at.isoformat())
+        if changed:
+            logger.info("onboarding.member_departed chat_id=%s user_id=%s", chat_id, user_id)
+        return changed
 
     async def start_direct_join(self, joined: DirectJoinInput) -> PendingJoin:
         """Handle ordinary joins where Telegram did not create a join-request update."""

@@ -45,6 +45,7 @@ class HandlerRoutingTests(unittest.IsolatedAsyncioTestCase):
         self.onboarding = OnboardingService(self.repository, self.gateway)
         self.onboarding.start_direct_join = AsyncMock()
         self.onboarding.start = AsyncMock()
+        self.onboarding.mark_member_departed = Mock(return_value=True)
         self.client = AsyncMock(spec=KimiCodingGroupReplyClient)
         self.client.reply.return_value = "测试回答"
         self.dispatcher = build_dispatcher(
@@ -134,6 +135,7 @@ class HandlerRoutingTests(unittest.IsolatedAsyncioTestCase):
         }})
         await self.dispatcher.feed_update(self.bot, update)
         self.assertNotIn((-100, 42), self.gateway._admin_cache)
+        self.onboarding.mark_member_departed.assert_called_once()
         self.service.moderate.assert_not_awaited()
 
     async def test_member_join_status_starts_second_stage_on_admin_approval(self) -> None:

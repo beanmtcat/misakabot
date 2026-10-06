@@ -32,6 +32,7 @@ class FakeGateway:
 
     async def approve_join_request(self, chat_id: int, user_id: int) -> None:
         self.approved.append((chat_id, user_id))
+        self.group_members.add((chat_id, user_id))
 
     async def decline_join_request(self, chat_id: int, user_id: int) -> None:
         self.declined.append((chat_id, user_id))
@@ -268,6 +269,41 @@ class OnboardingServiceTests(unittest.TestCase):
         self.assertIsNone(retried.callback_data)
         self.assertEqual(len(self.gateway.verifications), 1)
         self.assertEqual(len(self.gateway.group_challenges), 1)
+
+    def test_rejoin_restarts_first_stage_when_old_trusted_state_is_stale(self) -> None:
+        joined_at = datetime.now(timezone.utc)
+        pending = asyncio.run(
+            self.service.start_direct_join(
+                DirectJoinInput(chat_id=-100123, user_id=42, joined_at=joined_at)
+            )
+        )
+        challenge = asyncio.run(
+            self.service.resolve_group_challenge_by_admin(pending.callback_data or "", approved=True)
+        )
+        self.assertEqual(challenge.state, OnboardingState.PENDING_FIRST_MESSAGE)
+
+        reapplied = asyncio.run(self.service.start(self.request))
+
+        self.assertEqual(reapplied.state, OnboardingState.VERIFICATION_PENDING)
+        self.assertIsNotNone(reapplied.callback_data)
+        self.assertEqual(len(self.gateway.verifications), 1)
+
+    def test_departure_retires_old_trusted_state_before_rejoin(self) -> None:
+        joined_at = datetime.now(timezone.utc)
+        pending = asyncio.run(
+            self.service.start_direct_join(
+                DirectJoinInput(chat_id=-100123, user_id=42, joined_at=joined_at)
+            )
+        )
+        asyncio.run(
+            self.service.resolve_group_challenge_by_admin(pending.callback_data or "", approved=True)
+        )
+
+        self.assertTrue(self.service.mark_member_departed(-100123, 42, datetime.now(timezone.utc)))
+        reapplied = asyncio.run(self.service.start(self.request))
+
+        self.assertEqual(reapplied.state, OnboardingState.VERIFICATION_PENDING)
+        self.assertEqual(len(self.gateway.verifications), 1)
 
     def test_direct_join_is_restricted_until_its_own_button_is_verified(self) -> None:
         pending = asyncio.run(

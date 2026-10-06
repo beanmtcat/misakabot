@@ -617,6 +617,8 @@ class AuditRepository:
         token_hash: str,
         expires_at: str,
         verification_flow: str = "join_request",
+        *,
+        restart_existing: bool = False,
     ) -> bool:
         """Create or refresh a first-stage verification without regressing a member.
 
@@ -640,12 +642,41 @@ class AuditRepository:
                     verification_token_hash=excluded.verification_token_hash,
                     verification_expires_at=excluded.verification_expires_at,
                     verification_attempts=0, updated_at=excluded.updated_at
-                WHERE member_onboarding.state NOT IN (%s, %s, %s)
+                WHERE %s OR member_onboarding.state NOT IN (%s, %s, %s)
                 """,
                 (
                     request.chat_id, request.user_id, request.user_chat_id, request.username,
                     request.invite_link, verification_flow, OnboardingState.VERIFICATION_PENDING.value,
                     token_hash, expires_at, now, now,
+                    restart_existing,
+                    OnboardingState.SECONDARY_VERIFICATION_PENDING.value,
+                    OnboardingState.PENDING_FIRST_MESSAGE.value,
+                    OnboardingState.OBSERVING.value,
+                ),
+            )
+            connection.commit()
+        return cursor.rowcount == 1
+
+    def mark_member_departed(self, chat_id: int, user_id: int, now: str) -> bool:
+        """Retire trusted/in-group state after a member voluntarily leaves.
+
+        A later join request must start from the first verification stage again. Banned
+        users are deliberately untouched so leaving cannot clear a moderation ban.
+        """
+        with closing(self._connect()) as connection:
+            cursor = connection.execute(
+                """
+                UPDATE member_onboarding
+                SET state=%s, verification_token_hash=NULL, verification_expires_at=NULL,
+                    verification_attempts=0, verification_answer_index=NULL,
+                    verification_message_id=NULL, updated_at=%s
+                WHERE chat_id=%s AND user_id=%s AND state IN (%s, %s, %s)
+                """,
+                (
+                    OnboardingState.DECLINED.value,
+                    now,
+                    chat_id,
+                    user_id,
                     OnboardingState.SECONDARY_VERIFICATION_PENDING.value,
                     OnboardingState.PENDING_FIRST_MESSAGE.value,
                     OnboardingState.OBSERVING.value,
