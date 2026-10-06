@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { DataTable, Toolbar } from '../../components/DataTable';
 import TableFooter from '../../components/TableFooter';
 import { api, embyItemUrl, formatDate, formatTime } from '../../lib/api';
@@ -92,13 +92,27 @@ export default function SeriesPage({ notify, archived = false }) {
   const [syncMessage, setSyncMessage] = useState(null);
   const [syncingId, setSyncingId] = useState(null);
   const [activeIndex, setActiveIndex] = useState('');
+  const lastObservedSyncRevision = useRef(null);
+  const reloadList = useRef(null);
 
-  async function loadSyncStatus() {
+  async function loadSyncStatus(refreshListWhenChanged = false) {
     try {
       const status = await api('/v1/emby/sync-status');
-      setLastSyncedAt(status.series_tracking?.last_success_at || status.series?.last_success_at || null);
+      const relevantSyncTimes = [
+        status.series_tracking?.last_success_at,
+        status.series?.last_success_at,
+        status.moviepilot_subscriptions?.last_success_at,
+      ].filter(Boolean).sort();
+      const newestSyncTime = relevantSyncTimes.at(-1) || null;
+      const revision = relevantSyncTimes.join('|');
+      const previousRevision = lastObservedSyncRevision.current;
+      lastObservedSyncRevision.current = revision;
+      setLastSyncedAt(newestSyncTime);
       setTrackingEnabled(Boolean(status.series_tracking?.enabled));
       setMoviepilotEnabled(Boolean(status.moviepilot_subscriptions?.enabled));
+      if (refreshListWhenChanged && previousRevision !== null && revision !== previousRevision) {
+        await reloadList.current?.();
+      }
     } catch { /* The list remains usable if a status refresh fails. */ }
   }
 
@@ -118,6 +132,7 @@ export default function SeriesPage({ notify, archived = false }) {
       setTodayTotal(result.today_total || 0); setExceptionTotal(result.exception_total || 0);
     } catch (reason) { notify(reason.message, true); } finally { setLoading(false); }
   }
+  reloadList.current = load;
 
   useEffect(() => {
     const timer = window.setTimeout(load, 180);
@@ -126,7 +141,7 @@ export default function SeriesPage({ notify, archived = false }) {
   useEffect(() => {
     loadSyncStatus();
     loadLibraries();
-    const timer = window.setInterval(loadSyncStatus, 30000);
+    const timer = window.setInterval(() => loadSyncStatus(true), 30000);
     return () => window.clearInterval(timer);
   }, []);
 

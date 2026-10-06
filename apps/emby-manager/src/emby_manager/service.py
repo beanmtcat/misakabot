@@ -281,11 +281,15 @@ class EmbyManagementService:
                         episode_result = self._repository.upsert_tmdb_episodes(series_id, season_details)
                         episode_synced += episode_result["synced"]
                         episode_skipped += episode_result["skipped"]
-                    except (httpx.HTTPError, RuntimeError, ValueError):
+                    except (httpx.HTTPError, RuntimeError, ValueError) as error:
+                        expected_missing_season = (
+                            isinstance(error, httpx.HTTPStatusError)
+                            and error.response.status_code == 404
+                        )
                         logger.warning(
                             "series_tracking_season_lookup_failed series_id=%s tmdb_id=%s season=%s",
                             series_id, tmdb_id, season_number,
-                            exc_info=True,
+                            exc_info=not expected_missing_season,
                         )
                 self._repository.save_tracking_metadata(series_id, **snapshot)
                 updated += 1
