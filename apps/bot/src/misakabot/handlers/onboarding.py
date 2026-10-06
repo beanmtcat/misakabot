@@ -6,7 +6,7 @@ from aiogram import F, Router
 from aiogram.types import CallbackQuery, ChatJoinRequest, ChatMemberUpdated, Message
 
 from ..domain import DirectJoinInput, JoinRequestInput
-from ..gateway import AiogramGateway
+from ..gateway import AiogramGateway, is_active_chat_member
 from ..onboarding import OnboardingService
 from ..service import ModerationService
 from .admin import AdminActions
@@ -62,10 +62,12 @@ def build_onboarding_router(
             )
         old_status = getattr(event.old_chat_member.status, "value", event.old_chat_member.status)
         new_status = getattr(event.new_chat_member.status, "value", event.new_chat_member.status)
+        was_member = is_active_chat_member(event.old_chat_member)
+        is_member = is_active_chat_member(event.new_chat_member)
         member = event.new_chat_member.user
         if (
-            old_status in {"left", "kicked"}
-            and new_status in {"member", "restricted", "administrator", "creator"}
+            not was_member
+            and is_member
             and not member.is_bot
         ):
             logger.info(
@@ -83,17 +85,21 @@ def build_onboarding_router(
                 )
             )
         elif (
-            old_status in {"member", "restricted", "administrator", "creator"}
-            and new_status == "left"
+            was_member
+            and not is_member
+            and new_status != "kicked"
             and not member.is_bot
         ):
             _ = onboarding.mark_member_departed(event.chat.id, member.id, event.date)
         logger.info(
-            "group_member_role_changed cache_invalidated chat_id=%s user_id=%s old_status=%s new_status=%s",
+            "group_member_role_changed cache_invalidated chat_id=%s user_id=%s "
+            "old_status=%s new_status=%s was_member=%s is_member=%s",
             event.chat.id,
             event.new_chat_member.user.id,
             old_status,
             new_status,
+            was_member,
+            is_member,
         )
 
     @router.message(F.new_chat_members)

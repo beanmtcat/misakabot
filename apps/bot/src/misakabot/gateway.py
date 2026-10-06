@@ -22,6 +22,19 @@ from .repository import AuditRepository
 logger = logging.getLogger(__name__)
 logger.addHandler(logging.NullHandler())
 
+
+def is_active_chat_member(member: ChatMemberUnion) -> bool:
+    """Return actual membership, including Telegram's restricted/is_member split.
+
+    Telegram keeps the status value as ``restricted`` after some restricted users
+    leave. In that state ``is_member`` is false, so status alone is insufficient.
+    """
+    status = getattr(member.status, "value", member.status)
+    if status == "restricted":
+        return bool(getattr(member, "is_member", False))
+    return status in {"creator", "owner", "administrator", "member"}
+
+
 class AiogramGateway:
     _DELETION_LEASE_SECONDS = 120
     _DELETION_REQUEST_TIMEOUT_SECONDS = 30
@@ -73,8 +86,7 @@ class AiogramGateway:
 
     async def is_group_member(self, chat_id: int, user_id: int) -> bool:
         member = await self._get_chat_member(chat_id, user_id)
-        status = getattr(member.status, "value", member.status)
-        return status in {"creator", "owner", "administrator", "member", "restricted"}
+        return is_active_chat_member(member)
 
     async def get_member_info(self, chat_id: int, user_id: int) -> str:
         """Return a short, callback-alert-safe member summary for group administrators."""

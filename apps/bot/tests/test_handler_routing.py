@@ -138,6 +138,44 @@ class HandlerRoutingTests(unittest.IsolatedAsyncioTestCase):
         self.onboarding.mark_member_departed.assert_called_once()
         self.service.moderate.assert_not_awaited()
 
+    async def test_restricted_member_flag_turning_false_marks_departure(self) -> None:
+        user = {"id": 42, "is_bot": False, "first_name": "Member"}
+        permissions = {
+            "can_send_messages": False,
+            "can_send_audios": False,
+            "can_send_documents": False,
+            "can_send_photos": False,
+            "can_send_videos": False,
+            "can_send_video_notes": False,
+            "can_send_voice_notes": False,
+            "can_send_polls": False,
+            "can_send_other_messages": False,
+            "can_add_web_page_previews": False,
+            "can_react_to_messages": False,
+            "can_edit_tag": False,
+            "can_change_info": False,
+            "can_invite_users": False,
+            "can_pin_messages": False,
+            "can_manage_topics": False,
+            "until_date": 0,
+        }
+        update = Update.model_validate({"update_id": 4, "chat_member": {
+            "chat": {"id": -100, "type": "supergroup"},
+            "from": {"id": 99, "is_bot": False, "first_name": "Admin"},
+            "date": int(datetime.now(timezone.utc).timestamp()),
+            "old_chat_member": {
+                "status": "restricted", "user": user, "is_member": True, **permissions,
+            },
+            "new_chat_member": {
+                "status": "restricted", "user": user, "is_member": False, **permissions,
+            },
+        }})
+
+        await self.dispatcher.feed_update(self.bot, update)
+
+        self.onboarding.mark_member_departed.assert_called_once()
+        self.onboarding.start_direct_join.assert_not_awaited()
+
     async def test_member_join_status_starts_second_stage_on_admin_approval(self) -> None:
         user = {
             "id": 43,

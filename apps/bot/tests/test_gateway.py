@@ -8,7 +8,7 @@ from aiogram.enums import ChatMemberStatus
 from aiogram.methods import GetChatMember
 from aiogram.types import ChatMemberMember, User
 
-from misakabot.gateway import AiogramGateway
+from misakabot.gateway import AiogramGateway, is_active_chat_member
 
 
 class MemberInfoKeyboardTests(unittest.TestCase):
@@ -28,6 +28,19 @@ class MemberInfoKeyboardTests(unittest.TestCase):
 
 
 class MemberLookupRetryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_restricted_user_with_is_member_false_is_not_a_group_member(self) -> None:
+        bot = Mock()
+        bot.get_chat_member = AsyncMock(
+            return_value=Mock(status=ChatMemberStatus.RESTRICTED, is_member=False)
+        )
+        gateway = AiogramGateway(bot, Mock())
+
+        self.assertFalse(await gateway.is_group_member(-100123, 42))
+
+    async def test_restricted_user_with_is_member_true_is_a_group_member(self) -> None:
+        member = Mock(status=ChatMemberStatus.RESTRICTED, is_member=True)
+        self.assertTrue(is_active_chat_member(member))
+
     async def test_transient_network_error_is_retried(self) -> None:
         bot = Mock()
         method = GetChatMember(chat_id=-100123, user_id=42)
