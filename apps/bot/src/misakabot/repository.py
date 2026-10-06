@@ -617,10 +617,17 @@ class AuditRepository:
         token_hash: str,
         expires_at: str,
         verification_flow: str = "join_request",
-    ) -> None:
+    ) -> bool:
+        """Create or refresh a first-stage verification without regressing a member.
+
+        Telegram retries a webhook whenever a handler returns a non-2xx response.  A
+        delayed retry of the original ``chat_join_request`` must therefore not move a
+        member from the in-group challenge (or a completed state) back to the first
+        stage.
+        """
         now = request.requested_at.isoformat()
         with closing(self._connect()) as connection:
-            connection.execute(
+            cursor = connection.execute(
                 """
                 INSERT INTO member_onboarding(
                     chat_id, user_id, user_chat_id, username, invite_link, verification_flow, state,
@@ -633,14 +640,19 @@ class AuditRepository:
                     verification_token_hash=excluded.verification_token_hash,
                     verification_expires_at=excluded.verification_expires_at,
                     verification_attempts=0, updated_at=excluded.updated_at
+                WHERE member_onboarding.state NOT IN (%s, %s, %s)
                 """,
                 (
                     request.chat_id, request.user_id, request.user_chat_id, request.username,
                     request.invite_link, verification_flow, OnboardingState.VERIFICATION_PENDING.value,
                     token_hash, expires_at, now, now,
+                    OnboardingState.SECONDARY_VERIFICATION_PENDING.value,
+                    OnboardingState.PENDING_FIRST_MESSAGE.value,
+                    OnboardingState.OBSERVING.value,
                 ),
             )
             connection.commit()
+        return cursor.rowcount == 1
 
     def onboarding_state(self, chat_id: int, user_id: int) -> OnboardingState | None:
         with closing(self._connect()) as connection:

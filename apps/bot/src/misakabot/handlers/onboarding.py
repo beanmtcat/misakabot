@@ -45,8 +45,13 @@ def build_onboarding_router(
         )
 
     @router.chat_member()
-    async def invalidate_member_role_cache(event: ChatMemberUpdated) -> None:
-        """Apply Telegram administrator promotions/revocations without cache delay."""
+    async def receive_member_status_change(event: ChatMemberUpdated) -> None:
+        """Apply role changes and use membership transitions as the join signal.
+
+        Telegram does not consistently emit a ``new_chat_members`` service message
+        when an administrator approves a join request.  The ``chat_member`` transition
+        from left/kicked to an active status is the reliable Bot API signal.
+        """
         if event.chat.id not in allowed_group_ids:
             return
         # Cache invalidation is an Aiogram implementation detail, not an onboarding
@@ -54,6 +59,28 @@ def build_onboarding_router(
         if isinstance(service.gateway, AiogramGateway):
             service.gateway.invalidate_group_administrator_cache(
                 event.chat.id, event.new_chat_member.user.id
+            )
+        old_status = getattr(event.old_chat_member.status, "value", event.old_chat_member.status)
+        new_status = getattr(event.new_chat_member.status, "value", event.new_chat_member.status)
+        member = event.new_chat_member.user
+        if (
+            old_status in {"left", "kicked"}
+            and new_status in {"member", "restricted", "administrator", "creator"}
+            and not member.is_bot
+        ):
+            logger.info(
+                "member_join_status.received chat_id=%s user_id=%s via_join_request=%s",
+                event.chat.id,
+                member.id,
+                event.via_join_request,
+            )
+            await onboarding.start_direct_join(
+                DirectJoinInput(
+                    chat_id=event.chat.id,
+                    user_id=member.id,
+                    username=member.username,
+                    joined_at=event.date,
+                )
             )
         logger.info(
             "group_member_role_changed cache_invalidated chat_id=%s user_id=%s",

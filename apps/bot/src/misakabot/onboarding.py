@@ -138,6 +138,20 @@ class OnboardingService:
             )
         )
 
+    @staticmethod
+    def _is_terminal_private_message_error(error: Exception) -> bool:
+        """Return whether Telegram has definitively refused the verification DM."""
+        detail = str(error).casefold()
+        return any(
+            marker in detail
+            for marker in (
+                "bot can't initiate conversation with a user",
+                "bot was blocked by the user",
+                "user is deactivated",
+                "chat not found",
+            )
+        )
+
     def __init__(
         self,
         repository: AuditRepository,
@@ -164,13 +178,38 @@ class OnboardingService:
 
         token = secrets.token_urlsafe(24)
         expires_at = request.requested_at + timedelta(minutes=self.verification_ttl_minutes)
-        self.repository.create_pending_verification(
+        verification_created = self.repository.create_pending_verification(
             request, self._token_hash(token), expires_at.isoformat()
         )
+        if not verification_created:
+            # A retry of an old join-request update arrived after this member had
+            # already advanced.  Acknowledge it without sending a stale first-stage
+            # link or regressing the persisted state.
+            current_state = self.repository.onboarding_state(request.chat_id, request.user_id)
+            logger.info(
+                "onboarding.verification_retry_ignored chat_id=%s user_id=%s state=%s",
+                request.chat_id,
+                request.user_id,
+                current_state,
+            )
+            return PendingJoin(current_state or OnboardingState.VERIFICATION_PENDING, None)
         verification_url = f"{self.join_verify_url}?{urlencode({'session': token})}"
-        await self.gateway.send_join_verification(
-            request.user_chat_id, verification_url, request.group_title
-        )
+        try:
+            await self.gateway.send_join_verification(
+                request.user_chat_id, verification_url, request.group_title
+            )
+        except Exception as error:
+            if not self._is_terminal_private_message_error(error):
+                raise
+            # The pending row deliberately remains active: an administrator may still
+            # approve the request, after which the chat-member update starts stage two.
+            logger.warning(
+                "onboarding.verification_dm_unavailable chat_id=%s user_id=%s reason=%s",
+                request.chat_id,
+                request.user_id,
+                error,
+            )
+            return PendingJoin(OnboardingState.VERIFICATION_PENDING, None)
         logger.info(
             "onboarding.verification_sent chat_id=%s user_id=%s ttl_minutes=%s",
             request.chat_id, request.user_id, self.verification_ttl_minutes,

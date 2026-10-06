@@ -113,6 +113,13 @@ class ReleaseFailingGateway(FakeGateway):
         raise RuntimeError("temporary Telegram failure")
 
 
+class PrivateMessageUnavailableGateway(FakeGateway):
+    async def send_join_verification(
+        self, user_chat_id: int, callback_data: str, group_title: str | None
+    ) -> None:
+        raise RuntimeError("Telegram server says - Forbidden: bot can't initiate conversation with a user")
+
+
 class OnboardingServiceTests(unittest.TestCase):
     def setUp(self) -> None:
         self.tempdir = tempfile.TemporaryDirectory()
@@ -205,6 +212,34 @@ class OnboardingServiceTests(unittest.TestCase):
         outcome = asyncio.run(self.service.start(self.request))
         self.assertEqual(outcome.state, OnboardingState.VERIFICATION_PENDING)
         self.assertEqual(len(self.gateway.verifications), 1)
+
+    def test_unavailable_private_message_keeps_request_for_manual_approval(self) -> None:
+        self.gateway = PrivateMessageUnavailableGateway()
+        self.service = OnboardingService(
+            self.repository, self.gateway, join_verify_url="https://dashboard.example/join-verify"
+        )
+
+        outcome = asyncio.run(self.service.start(self.request))
+
+        self.assertEqual(outcome.state, OnboardingState.VERIFICATION_PENDING)
+        self.assertIsNone(outcome.callback_data)
+        self.assertEqual(
+            self.repository.onboarding_state(self.request.chat_id, self.request.user_id),
+            OnboardingState.VERIFICATION_PENDING,
+        )
+
+    def test_retried_join_request_does_not_regress_second_stage(self) -> None:
+        pending = asyncio.run(self.service.start(self.request))
+        token = parse_qs(urlparse(pending.callback_data or "").query)["session"][0]
+        verified = asyncio.run(self.service.verify_token(token, self.request.user_id))
+        self.assertEqual(verified.state, OnboardingState.SECONDARY_VERIFICATION_PENDING)
+
+        retried = asyncio.run(self.service.start(self.request))
+
+        self.assertEqual(retried.state, OnboardingState.SECONDARY_VERIFICATION_PENDING)
+        self.assertIsNone(retried.callback_data)
+        self.assertEqual(len(self.gateway.verifications), 1)
+        self.assertEqual(len(self.gateway.group_challenges), 1)
 
     def test_direct_join_is_restricted_until_its_own_button_is_verified(self) -> None:
         pending = asyncio.run(

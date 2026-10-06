@@ -135,3 +135,28 @@ class HandlerRoutingTests(unittest.IsolatedAsyncioTestCase):
         await self.dispatcher.feed_update(self.bot, update)
         self.assertNotIn((-100, 42), self.gateway._admin_cache)
         self.service.moderate.assert_not_awaited()
+
+    async def test_member_join_status_starts_second_stage_on_admin_approval(self) -> None:
+        user = {
+            "id": 43,
+            "is_bot": False,
+            "first_name": "New member",
+            "username": "new_member",
+        }
+        update = Update.model_validate({"update_id": 3, "chat_member": {
+            "chat": {"id": -100, "type": "supergroup"},
+            "from": {"id": 99, "is_bot": False, "first_name": "Admin"},
+            "date": int(datetime.now(timezone.utc).timestamp()),
+            "old_chat_member": {"status": "left", "user": user},
+            "new_chat_member": {"status": "member", "user": user},
+            "via_join_request": True,
+        }})
+
+        await self.dispatcher.feed_update(self.bot, update)
+
+        self.onboarding.start_direct_join.assert_awaited_once()
+        joined = self.onboarding.start_direct_join.await_args.args[0]
+        self.assertEqual(joined.chat_id, -100)
+        self.assertEqual(joined.user_id, 43)
+        self.assertEqual(joined.username, "new_member")
+        self.service.moderate.assert_not_awaited()
