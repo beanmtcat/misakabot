@@ -152,6 +152,12 @@ class OnboardingService:
             )
         )
 
+    @staticmethod
+    def _is_already_group_member_error(error: Exception) -> bool:
+        """Telegram reports this when an administrator won the approval race."""
+        detail = str(error).casefold()
+        return "user_already_participant" in detail or "user already participant" in detail
+
     def __init__(
         self,
         repository: AuditRepository,
@@ -378,13 +384,27 @@ class OnboardingService:
                 )
             else:
                 raise ValueError(f"unknown verification flow: {verification_flow}")
-        except Exception:
-            logger.exception("onboarding.approval_failed chat_id=%s user_id=%s", chat_id, user_id)
-            retry_expiry = (datetime.now(timezone.utc) + timedelta(minutes=1)).isoformat()
-            self.repository.reset_verification_after_approval_failure(
-                chat_id, user_id, token_hash, retry_expiry, now
-            )
-            return JoinVerificationOutcome(False, OnboardingState.VERIFICATION_PENDING, "自动放行失败，请重新申请入群")
+        except Exception as error:
+            if self._is_already_group_member_error(error):
+                # An administrator approved the same request between Turnstile
+                # completion and this API call.  Approval is idempotently complete;
+                # continue with stage two instead of rolling the member backwards.
+                logger.info(
+                    "onboarding.approval_already_completed chat_id=%s user_id=%s",
+                    chat_id,
+                    user_id,
+                )
+            else:
+                logger.exception("onboarding.approval_failed chat_id=%s user_id=%s", chat_id, user_id)
+                retry_expiry = (datetime.now(timezone.utc) + timedelta(minutes=1)).isoformat()
+                self.repository.reset_verification_after_approval_failure(
+                    chat_id, user_id, token_hash, retry_expiry, now
+                )
+                return JoinVerificationOutcome(
+                    False,
+                    OnboardingState.VERIFICATION_PENDING,
+                    "自动放行失败，请重新申请入群",
+                )
         try:
             await self._start_group_challenge(
                 chat_id=chat_id,
@@ -634,13 +654,16 @@ class OnboardingService:
             if state is OnboardingState.VERIFICATION_PENDING and verification_flow == "join_request":
                 try:
                     already_joined = await self.gateway.is_group_member(chat_id, user_id)
-                except Exception:
-                    logger.exception(
-                        "onboarding.expiry_member_status_lookup_failed chat_id=%s user_id=%s",
+                except Exception as error:
+                    # Membership is unknown.  Never turn a failed read into a
+                    # destructive decline: leave the row pending for the next cycle.
+                    logger.warning(
+                        "onboarding.expiry_member_status_lookup_deferred chat_id=%s user_id=%s reason=%s",
                         chat_id,
                         user_id,
+                        error,
                     )
-                    already_joined = False
+                    continue
                 if already_joined:
                     # The new-member event can be delayed or missed during a deployment.
                     # Do not reject an already approved member; convert them to the second

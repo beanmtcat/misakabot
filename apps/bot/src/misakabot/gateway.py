@@ -7,8 +7,14 @@ from datetime import datetime, timedelta, timezone
 from time import monotonic
 
 from aiogram import Bot
-from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+from aiogram.exceptions import (
+    TelegramBadRequest,
+    TelegramForbiddenError,
+    TelegramNetworkError,
+    TelegramRetryAfter,
+    TelegramServerError,
+)
+from aiogram.types import ChatMemberUnion, InlineKeyboardButton, InlineKeyboardMarkup
 
 from .onboarding import OnboardingService
 from .repository import AuditRepository
@@ -22,6 +28,7 @@ class AiogramGateway:
     _ADMIN_CACHE_TTL_SECONDS = 30.0
     _WEBHOOK_UPDATE_RETENTION_DAYS = 7
     _ABANDONED_WEBHOOK_LEASE_RETENTION_DAYS = 1
+    _MEMBER_LOOKUP_RETRY_DELAYS_SECONDS: tuple[float, ...] = (0.25, 0.75, 1.5)
 
     def __init__(self, bot: Bot, repository: AuditRepository) -> None:
         self.bot = bot
@@ -54,7 +61,7 @@ class AiogramGateway:
         cached = self._admin_cache.get(key)
         if cached and cached[1] > monotonic():
             return cached[0]
-        member = await self.bot.get_chat_member(chat_id, user_id)
+        member = await self._get_chat_member(chat_id, user_id)
         status = getattr(member.status, "value", member.status)
         is_admin = status in {"creator", "owner", "administrator"}
         self._admin_cache[key] = (is_admin, monotonic() + self._ADMIN_CACHE_TTL_SECONDS)
@@ -65,17 +72,49 @@ class AiogramGateway:
         self._admin_cache.pop((chat_id, user_id), None)
 
     async def is_group_member(self, chat_id: int, user_id: int) -> bool:
-        member = await self.bot.get_chat_member(chat_id, user_id)
+        member = await self._get_chat_member(chat_id, user_id)
         status = getattr(member.status, "value", member.status)
         return status in {"creator", "owner", "administrator", "member", "restricted"}
 
     async def get_member_info(self, chat_id: int, user_id: int) -> str:
         """Return a short, callback-alert-safe member summary for group administrators."""
-        member = await self.bot.get_chat_member(chat_id, user_id)
+        member = await self._get_chat_member(chat_id, user_id)
         user = member.user
         username = f"@{user.username}" if user.username else "未设置"
         display_name = (user.full_name or "未设置").replace("\n", " ")[:80]
         return f"用户 ID：{user.id}\n用户名：{username}\n显示名称：{display_name}"
+
+    async def _get_chat_member(self, chat_id: int, user_id: int) -> ChatMemberUnion:
+        """Retry the read-only Telegram lookup on transport and server failures.
+
+        This call is safe to repeat and is used by both authorization checks and
+        onboarding expiry.  Bad requests and permission failures are deliberately
+        not retried because another attempt cannot change their outcome.
+        """
+        delays = self._MEMBER_LOOKUP_RETRY_DELAYS_SECONDS
+        for attempt in range(len(delays) + 1):
+            try:
+                return await self.bot.get_chat_member(chat_id, user_id, request_timeout=10)
+            except TelegramRetryAfter as error:
+                if attempt >= len(delays):
+                    raise
+                delay = min(max(float(error.retry_after), delays[attempt]), 5.0)
+                reason = str(error)
+            except (TelegramNetworkError, TelegramServerError) as error:
+                if attempt >= len(delays):
+                    raise
+                delay = delays[attempt]
+                reason = str(error)
+            logger.warning(
+                "telegram.member_lookup_retry chat_id=%s user_id=%s attempt=%s delay=%.2f reason=%s",
+                chat_id,
+                user_id,
+                attempt + 1,
+                delay,
+                reason,
+            )
+            await asyncio.sleep(delay)
+        raise RuntimeError("unreachable member lookup retry state")
 
     @staticmethod
     def _member_info_keyboard(user_id: int, username: str | None = None) -> InlineKeyboardMarkup:

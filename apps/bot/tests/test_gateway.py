@@ -1,6 +1,12 @@
 from __future__ import annotations
 
 import unittest
+from unittest.mock import AsyncMock, Mock, patch
+
+from aiogram.exceptions import TelegramNetworkError
+from aiogram.enums import ChatMemberStatus
+from aiogram.methods import GetChatMember
+from aiogram.types import ChatMemberMember, User
 
 from misakabot.gateway import AiogramGateway
 
@@ -20,3 +26,23 @@ class MemberInfoKeyboardTests(unittest.TestCase):
         self.assertEqual(button.url, "https://t.me/member_name?profile")
         self.assertIsNone(button.callback_data)
 
+
+class MemberLookupRetryTests(unittest.IsolatedAsyncioTestCase):
+    async def test_transient_network_error_is_retried(self) -> None:
+        bot = Mock()
+        method = GetChatMember(chat_id=-100123, user_id=42)
+        member = ChatMemberMember(
+            status=ChatMemberStatus.MEMBER,
+            user=User(id=42, is_bot=False, first_name="A"),
+        )
+        bot.get_chat_member = AsyncMock(
+            side_effect=[TelegramNetworkError(method, "connection reset"), member]
+        )
+        gateway = AiogramGateway(bot, Mock())
+        gateway._MEMBER_LOOKUP_RETRY_DELAYS_SECONDS = (0.0,)
+
+        with patch("misakabot.gateway.asyncio.sleep", new=AsyncMock()) as sleep:
+            self.assertFalse(await gateway.is_group_administrator(-100123, 42))
+
+        self.assertEqual(bot.get_chat_member.await_count, 2)
+        sleep.assert_awaited_once_with(0.0)

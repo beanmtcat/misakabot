@@ -68,13 +68,14 @@ def build_message_router(
                     message.from_user.id,
                     event_id,
                 )
-        except Exception:
+        except Exception as error:
             # Failing open is deliberate: an unknown administrator must never be
             # auto-moderated just because Telegram's membership lookup failed.
-            logger.exception(
-                "message.group_admin_lookup_failed chat_id=%s user_id=%s",
+            logger.warning(
+                "message.group_admin_lookup_deferred chat_id=%s user_id=%s reason=%s",
                 message.chat.id,
                 message.from_user.id,
+                error,
             )
             return
         outcome = None

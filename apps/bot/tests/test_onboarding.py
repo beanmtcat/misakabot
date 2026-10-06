@@ -120,6 +120,16 @@ class PrivateMessageUnavailableGateway(FakeGateway):
         raise RuntimeError("Telegram server says - Forbidden: bot can't initiate conversation with a user")
 
 
+class AlreadyParticipantApprovalGateway(FakeGateway):
+    async def approve_join_request(self, chat_id: int, user_id: int) -> None:
+        raise RuntimeError("Telegram server says - Bad Request: USER_ALREADY_PARTICIPANT")
+
+
+class MemberLookupFailingGateway(FakeGateway):
+    async def is_group_member(self, chat_id: int, user_id: int) -> bool:
+        raise RuntimeError("temporary Telegram member lookup failure")
+
+
 class OnboardingServiceTests(unittest.TestCase):
     def setUp(self) -> None:
         self.tempdir = tempfile.TemporaryDirectory()
@@ -169,6 +179,24 @@ class OnboardingServiceTests(unittest.TestCase):
 
         self.assertTrue(self.service.mark_first_message(-100123, 42, datetime.now(timezone.utc)))
         self.assertFalse(self.service.mark_first_message(-100123, 42, datetime.now(timezone.utc)))
+
+    def test_first_stage_continues_when_admin_already_approved_request(self) -> None:
+        self.gateway = AlreadyParticipantApprovalGateway()
+        self.service = OnboardingService(
+            self.repository, self.gateway, join_verify_url="https://dashboard.example/join-verify"
+        )
+        pending = asyncio.run(self.service.start(self.request))
+        token = parse_qs(urlparse(pending.callback_data or "").query)["session"][0]
+
+        outcome = asyncio.run(self.service.verify_token(token, self.request.user_id))
+
+        self.assertTrue(outcome.accepted)
+        self.assertEqual(outcome.state, OnboardingState.SECONDARY_VERIFICATION_PENDING)
+        self.assertEqual(len(self.gateway.group_challenges), 1)
+        self.assertEqual(
+            self.repository.onboarding_state(self.request.chat_id, self.request.user_id),
+            OnboardingState.SECONDARY_VERIFICATION_PENDING,
+        )
 
     def test_only_the_requesting_account_can_use_its_token(self) -> None:
         pending = asyncio.run(self.service.start(self.request))
@@ -471,6 +499,28 @@ class OnboardingServiceTests(unittest.TestCase):
         self.assertEqual(len(self.gateway.group_challenges), 1)
         self.assertEqual(
             self.repository.onboarding_state(-100123, 93), OnboardingState.SECONDARY_VERIFICATION_PENDING
+        )
+
+    def test_expiry_defers_when_member_status_cannot_be_checked(self) -> None:
+        now = datetime.now(timezone.utc)
+        self.gateway = MemberLookupFailingGateway()
+        self.service = OnboardingService(
+            self.repository, self.gateway, join_verify_url="https://dashboard.example/join-verify"
+        )
+        request = JoinRequestInput(
+            chat_id=-100123,
+            user_id=94,
+            user_chat_id=9400,
+            requested_at=now - timedelta(minutes=11),
+        )
+        asyncio.run(self.service.start(request))
+
+        completed = asyncio.run(self.service.expire_pending_verifications(now))
+
+        self.assertEqual(completed, 0)
+        self.assertEqual(self.gateway.declined, [])
+        self.assertEqual(
+            self.repository.onboarding_state(-100123, 94), OnboardingState.VERIFICATION_PENDING
         )
 
     def test_deactivated_user_expiry_is_closed_without_retrying(self) -> None:

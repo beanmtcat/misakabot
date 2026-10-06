@@ -52,12 +52,13 @@ class ModerationService:
             # not enough evidence to delete a normal conversation or temporarily mute a member.
             try:
                 verdict = await self.llm.judge(normalized, signals)
-            except Exception:
-                logger.exception(
-                    "moderation.first_observed_llm_failed chat_id=%s message_id=%s user_id=%s",
+            except Exception as error:
+                logger.warning(
+                    "moderation.first_observed_llm_deferred chat_id=%s message_id=%s user_id=%s reason=%s",
                     incoming.chat_id,
                     incoming.message_id,
                     incoming.user_id,
+                    error,
                 )
                 verdict = None
             if verdict is None:
@@ -98,10 +99,13 @@ class ModerationService:
         )
         try:
             verdict = await self.llm.judge(normalized, signals)
-        except Exception:
-            logger.exception(
-                "moderation.llm_failed chat_id=%s message_id=%s user_id=%s",
-                incoming.chat_id, incoming.message_id, incoming.user_id,
+        except Exception as error:
+            logger.warning(
+                "moderation.llm_deferred chat_id=%s message_id=%s user_id=%s reason=%s",
+                incoming.chat_id,
+                incoming.message_id,
+                incoming.user_id,
+                error,
             )
             event_id = self.repository.record(
                 incoming, normalized, signals, None, Action.NEEDS_REVIEW, ReviewStatus.PENDING
