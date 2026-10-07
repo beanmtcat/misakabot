@@ -813,6 +813,8 @@ class LegacyEmbyRepository:
                 continue
             rows.append((
                 episode_id, series_id, _nullable(payload.get("SeriesName")),
+                _nullable(payload.get("SeasonId")), _nullable(payload.get("SeasonName")),
+                _positive_int(payload.get("ParentId")),
                 _non_negative_int(payload.get("ParentIndexNumber")),
                 _non_negative_int(payload.get("IndexNumber")), name,
                 _nullable(payload.get("DateCreated")), _nullable(payload.get("Path")),
@@ -825,10 +827,13 @@ class LegacyEmbyRepository:
                 with connection.cursor() as cursor:
                     cursor.executemany(
                         '''INSERT INTO dragonli_emby_episodes
-                        (id,series_id,series_name,parent_index_number,index_number,name,date_created,path,isvalid)
-                        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,1)
+                        (id,series_id,series_name,season_id,season_name,parent_id,
+                         parent_index_number,index_number,name,date_created,path,isvalid)
+                        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,1)
                         ON CONFLICT (id) DO UPDATE SET
                           series_id=EXCLUDED.series_id,series_name=EXCLUDED.series_name,
+                          season_id=EXCLUDED.season_id,season_name=EXCLUDED.season_name,
+                          parent_id=EXCLUDED.parent_id,
                           parent_index_number=EXCLUDED.parent_index_number,index_number=EXCLUDED.index_number,
                           name=EXCLUDED.name,date_created=EXCLUDED.date_created,path=EXCLUDED.path,isvalid=1''',
                         rows,

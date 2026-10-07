@@ -69,7 +69,9 @@ class EmbyClient:
         async def fetch(series_id: int) -> list[Mapping[str, object]]:
             async with semaphore:
                 return await self._list_items(
-                    "Episode", "SeriesId,SeriesName,ParentIndexNumber,IndexNumber,DateCreated,Path",
+                    "Episode",
+                    "SeriesId,SeriesName,SeasonId,SeasonName,ParentId,"
+                    "ParentIndexNumber,IndexNumber,DateCreated,Path",
                     parent_id=series_id,
                 )
 
