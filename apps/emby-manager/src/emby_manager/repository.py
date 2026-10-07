@@ -800,9 +800,18 @@ class LegacyEmbyRepository:
                     )
         return action
 
-    def upsert_emby_episodes(self, payloads: list[Mapping[str, object]]) -> dict[str, int]:
+    def upsert_emby_episodes(
+        self,
+        payloads: list[Mapping[str, object]],
+        synchronized_series_ids: Iterable[int] = (),
+    ) -> dict[str, int]:
         synced = skipped = 0
-        series_ids: set[int] = set()
+        series_ids = {
+            series_id
+            for value in synchronized_series_ids
+            if (series_id := _positive_int(value)) is not None
+        }
+        episode_ids: list[str] = []
         rows: list[tuple[object, ...]] = []
         for payload in payloads:
             episode_id = _positive_int(payload.get("Id"))
@@ -819,38 +828,52 @@ class LegacyEmbyRepository:
                 _non_negative_int(payload.get("IndexNumber")), name,
                 _nullable(payload.get("DateCreated")), _nullable(payload.get("Path")),
             ))
+            episode_ids.append(str(episode_id))
             series_ids.add(series_id)
-        if not rows:
-            return {"synced": 0, "skipped": skipped}
+        if not rows and not series_ids:
+            return {"synced": 0, "skipped": skipped, "invalidated": 0}
+        invalidated = 0
         with closing(psycopg.connect(self._database_url, row_factory=dict_row)) as connection:
             with connection.transaction():
-                with connection.cursor() as cursor:
-                    cursor.executemany(
-                        '''INSERT INTO dragonli_emby_episodes
-                        (id,series_id,series_name,season_id,season_name,parent_id,
-                         parent_index_number,index_number,name,date_created,path,isvalid)
-                        VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,1)
-                        ON CONFLICT (id) DO UPDATE SET
-                          series_id=EXCLUDED.series_id,series_name=EXCLUDED.series_name,
-                          season_id=EXCLUDED.season_id,season_name=EXCLUDED.season_name,
-                          parent_id=EXCLUDED.parent_id,
-                          parent_index_number=EXCLUDED.parent_index_number,index_number=EXCLUDED.index_number,
-                          name=EXCLUDED.name,date_created=EXCLUDED.date_created,path=EXCLUDED.path,isvalid=1''',
-                        rows,
-                    )
+                if rows:
+                    with connection.cursor() as cursor:
+                        cursor.executemany(
+                            '''INSERT INTO dragonli_emby_episodes
+                            (id,series_id,series_name,season_id,season_name,parent_id,
+                             parent_index_number,index_number,name,date_created,path,isvalid)
+                            VALUES (%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,%s,1)
+                            ON CONFLICT (id) DO UPDATE SET
+                              series_id=EXCLUDED.series_id,series_name=EXCLUDED.series_name,
+                              season_id=EXCLUDED.season_id,season_name=EXCLUDED.season_name,
+                              parent_id=EXCLUDED.parent_id,
+                              parent_index_number=EXCLUDED.parent_index_number,index_number=EXCLUDED.index_number,
+                              name=EXCLUDED.name,date_created=EXCLUDED.date_created,path=EXCLUDED.path,isvalid=1''',
+                            rows,
+                        )
+                if episode_ids:
+                    invalidated = connection.execute(
+                        '''UPDATE dragonli_emby_episodes SET isvalid=0,mtime=NOW()
+                        WHERE isvalid=1 AND series_id = ANY(%s)
+                          AND NOT (id = ANY(%s))''',
+                        (list(series_ids), episode_ids),
+                    ).rowcount
+                else:
+                    invalidated = connection.execute(
+                        '''UPDATE dragonli_emby_episodes SET isvalid=0,mtime=NOW()
+                        WHERE isvalid=1 AND series_id = ANY(%s)''',
+                        (list(series_ids),),
+                    ).rowcount
                 connection.execute(
-                    '''UPDATE dragonli_emby_series AS series SET server_latest=episode.latest,
-                      mtime=NOW()
-                    FROM (
-                      SELECT series_id,MAX(index_number) AS latest
-                      FROM dragonli_emby_episodes
-                      WHERE isvalid=1 AND series_id = ANY(%s)
-                      GROUP BY series_id
-                    ) AS episode
-                    WHERE series.id=episode.series_id''',
+                    '''UPDATE dragonli_emby_series AS series
+                    SET server_latest=COALESCE((
+                      SELECT MAX(episode.index_number)
+                      FROM dragonli_emby_episodes AS episode
+                      WHERE episode.isvalid=1 AND episode.series_id=series.id
+                    ),0),mtime=NOW()
+                    WHERE series.id = ANY(%s)''',
                     (list(series_ids),),
                 )
-        return {"synced": len(rows), "skipped": skipped}
+        return {"synced": len(rows), "skipped": skipped, "invalidated": invalidated}
 
     def tracked_emby_series_ids(self) -> list[int]:
         rows = self._all(

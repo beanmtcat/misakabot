@@ -365,11 +365,13 @@ class EmbyManagementService:
                 skipped += 1
         tracked_ids = self._repository.tracked_emby_series_ids()
         episodes = self._repository.upsert_emby_episodes(
-            await self._client.list_episodes_for_series(tracked_ids)
+            await self._client.list_episodes_for_series(tracked_ids),
+            tracked_ids,
         )
         return {
             "created": created, "updated": updated, "promoted": promoted, "skipped": skipped,
             "episodes": episodes["synced"], "episode_skipped": episodes["skipped"],
+            "episode_invalidated": episodes["invalidated"],
         }
 
     async def sync_one_series(self, series_id: int) -> dict[str, object]:
@@ -377,12 +379,14 @@ class EmbyManagementService:
             raise ValueError("该剧集尚未关联 Emby，无法单独同步")
         action = self._repository.upsert_emby_series(await self._client.get_series(series_id))
         episodes = self._repository.upsert_emby_episodes(
-            await self._client.list_episodes_for_series([series_id])
+            await self._client.list_episodes_for_series([series_id]),
+            [series_id],
         )
         result: dict[str, object] = {
             "action": action,
             "episodes": episodes["synced"],
             "episode_skipped": episodes["skipped"],
+            "episode_invalidated": episodes["invalidated"],
         }
         tracked = self._repository.tracked_series(series_id)
         if tracked is not None and self._tmdb_client is not None:
