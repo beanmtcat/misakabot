@@ -78,6 +78,33 @@ class EmbyClient:
         pages = await asyncio.gather(*(fetch(series_id) for series_id in series_ids))
         return [episode for page in pages for episode in page]
 
+    async def list_episodes_by_ids(self, episode_ids: list[str]) -> list[Mapping[str, object]]:
+        """Fetch specific legacy episodes in bounded batches for metadata repair."""
+        fields = (
+            "SeriesId,SeriesName,SeasonId,SeasonName,ParentId,"
+            "ParentIndexNumber,IndexNumber,DateCreated,Path"
+        )
+        batches = [episode_ids[index:index + 100] for index in range(0, len(episode_ids), 100)]
+        semaphore = asyncio.Semaphore(4)
+
+        async def fetch(batch: list[str]) -> list[Mapping[str, object]]:
+            async with semaphore:
+                payload = await self._request(
+                    "GET",
+                    "/Items",
+                    params={
+                        "Ids": ",".join(batch),
+                        "IncludeItemTypes": "Episode",
+                        "Fields": fields,
+                    },
+                )
+            if not isinstance(payload, Mapping) or not isinstance(payload.get("Items"), list):
+                raise RuntimeError("Emby episode metadata lookup returned an unexpected response")
+            return [entry for entry in payload["Items"] if isinstance(entry, Mapping)]
+
+        pages = await asyncio.gather(*(fetch(batch) for batch in batches))
+        return [episode for page in pages for episode in page]
+
     async def get_series(self, series_id: int) -> Mapping[str, object]:
         payload = await self._request(
             "GET",

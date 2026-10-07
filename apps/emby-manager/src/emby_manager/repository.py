@@ -806,11 +806,12 @@ class LegacyEmbyRepository:
         synchronized_series_ids: Iterable[int] = (),
     ) -> dict[str, int]:
         synced = skipped = 0
-        series_ids = {
+        synchronized_ids = {
             series_id
             for value in synchronized_series_ids
             if (series_id := _positive_int(value)) is not None
         }
+        affected_series_ids = set(synchronized_ids)
         episode_ids: list[str] = []
         rows: list[tuple[object, ...]] = []
         for payload in payloads:
@@ -829,8 +830,13 @@ class LegacyEmbyRepository:
                 _nullable(payload.get("DateCreated")), _nullable(payload.get("Path")),
             ))
             episode_ids.append(str(episode_id))
-            series_ids.add(series_id)
-        if not rows and not series_ids:
+            affected_series_ids.add(series_id)
+            if synchronized_ids:
+                # Emby can return episodes whose SeriesId belongs to an older
+                # duplicate while querying the current series ParentId. Treat
+                # those returned series as part of the same complete snapshot.
+                synchronized_ids.add(series_id)
+        if not rows and not affected_series_ids:
             return {"synced": 0, "skipped": skipped, "invalidated": 0}
         invalidated = 0
         with closing(psycopg.connect(self._database_url, row_factory=dict_row)) as connection:
@@ -850,18 +856,18 @@ class LegacyEmbyRepository:
                               name=EXCLUDED.name,date_created=EXCLUDED.date_created,path=EXCLUDED.path,isvalid=1''',
                             rows,
                         )
-                if episode_ids:
+                if synchronized_ids and episode_ids:
                     invalidated = connection.execute(
                         '''UPDATE dragonli_emby_episodes SET isvalid=0,mtime=NOW()
                         WHERE isvalid=1 AND series_id = ANY(%s)
                           AND NOT (id = ANY(%s))''',
-                        (list(series_ids), episode_ids),
+                        (list(synchronized_ids), episode_ids),
                     ).rowcount
-                else:
+                elif synchronized_ids:
                     invalidated = connection.execute(
                         '''UPDATE dragonli_emby_episodes SET isvalid=0,mtime=NOW()
                         WHERE isvalid=1 AND series_id = ANY(%s)''',
-                        (list(series_ids),),
+                        (list(synchronized_ids),),
                     ).rowcount
                 connection.execute(
                     '''UPDATE dragonli_emby_series AS series
@@ -871,9 +877,29 @@ class LegacyEmbyRepository:
                       WHERE episode.isvalid=1 AND episode.series_id=series.id
                     ),0),mtime=NOW()
                     WHERE series.id = ANY(%s)''',
-                    (list(series_ids),),
+                    (list(affected_series_ids),),
                 )
         return {"synced": len(rows), "skipped": skipped, "invalidated": invalidated}
+
+    def episode_ids_missing_parent_metadata(self) -> list[str]:
+        rows = self._all(
+            '''SELECT id FROM dragonli_emby_episodes
+            WHERE isvalid=1 AND parent_id IS NULL ORDER BY id'''
+        )
+        return [_string(row.get("id")) for row in rows if _string(row.get("id"))]
+
+    def invalidate_emby_episode_ids(self, episode_ids: Iterable[str]) -> int:
+        ids = sorted({_string(value) for value in episode_ids if _string(value)})
+        if not ids:
+            return 0
+        with closing(psycopg.connect(self._database_url)) as connection:
+            cursor = connection.execute(
+                '''UPDATE dragonli_emby_episodes SET isvalid=0,mtime=NOW()
+                WHERE isvalid=1 AND id = ANY(%s)''',
+                (ids,),
+            )
+            connection.commit()
+            return cursor.rowcount
 
     def tracked_emby_series_ids(self) -> list[int]:
         rows = self._all(

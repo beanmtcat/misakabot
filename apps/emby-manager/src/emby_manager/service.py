@@ -368,10 +368,26 @@ class EmbyManagementService:
             await self._client.list_episodes_for_series(tracked_ids),
             tracked_ids,
         )
+        missing_metadata_ids = self._repository.episode_ids_missing_parent_metadata()
+        metadata_backfill = {"synced": 0, "skipped": 0, "invalidated": 0}
+        missing_invalidated = 0
+        if missing_metadata_ids:
+            metadata_payloads = await self._client.list_episodes_by_ids(missing_metadata_ids)
+            metadata_backfill = self._repository.upsert_emby_episodes(metadata_payloads)
+            found_ids = {
+                episode_id
+                for payload in metadata_payloads
+                if (episode_id := _text(payload.get("Id")))
+            }
+            missing_invalidated = self._repository.invalidate_emby_episode_ids(
+                set(missing_metadata_ids) - found_ids
+            )
         return {
             "created": created, "updated": updated, "promoted": promoted, "skipped": skipped,
             "episodes": episodes["synced"], "episode_skipped": episodes["skipped"],
             "episode_invalidated": episodes["invalidated"],
+            "episode_metadata_backfilled": metadata_backfill["synced"],
+            "episode_missing_invalidated": missing_invalidated,
         }
 
     async def sync_one_series(self, series_id: int) -> dict[str, object]:
