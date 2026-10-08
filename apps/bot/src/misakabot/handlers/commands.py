@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timedelta, timezone
 from urllib.parse import urlencode
 
 from aiogram import F, Router
@@ -16,6 +17,16 @@ from .admin import AdminActions
 
 logger = logging.getLogger(__name__)
 logger.addHandler(logging.NullHandler())
+
+
+SINGAPORE_TIMEZONE = timezone(timedelta(hours=8), name="Asia/Singapore")
+
+
+def format_join_guard_expiry(defense_until: datetime | None) -> str:
+    if defense_until is None:
+        return ""
+    local_expiry = defense_until.astimezone(SINGAPORE_TIMEZONE)
+    return f"\n预计结束（新加坡时间）：{local_expiry.strftime('%Y-%m-%d %H:%M:%S')}"
 
 
 def build_command_router(
@@ -140,7 +151,7 @@ def build_command_router(
             JoinGuardMode.PERMANENT_HIGH: "手动高防",
             JoinGuardMode.PERMANENT_LOCKDOWN: "手动完全封锁",
         }
-        expiry = f"\n预计结束：{defense_until.astimezone().strftime('%Y-%m-%d %H:%M:%S')}" if defense_until else ""
+        expiry = format_join_guard_expiry(defense_until)
         await message.answer(f"当前入群防护：{labels[mode]}{expiry}")
 
     @router.message(Command("memory"))
