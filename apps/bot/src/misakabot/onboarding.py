@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import logging
 import random
@@ -752,97 +753,82 @@ class OnboardingService:
         current = now or datetime.now(timezone.utc)
         timestamp = current.isoformat()
         expired = self.repository.expired_pending_verifications(timestamp)
-        completed = 0
-        for chat_id, user_id, verification_flow, state, message_id in expired:
-            if state is OnboardingState.VERIFICATION_PENDING and verification_flow == "join_request":
-                try:
-                    already_joined = await self.gateway.is_group_member(chat_id, user_id)
-                except Exception as error:
-                    # Membership is unknown.  Never turn a failed read into a
-                    # destructive decline: leave the row pending for the next cycle.
-                    logger.warning(
-                        "onboarding.expiry_member_status_lookup_deferred chat_id=%s user_id=%s reason=%s",
-                        chat_id,
-                        user_id,
-                        error,
-                    )
-                    continue
-                if already_joined:
-                    # The new-member event can be delayed or missed during a deployment.
-                    # Do not reject an already approved member; convert them to the second
-                    # stage instead, which gets its own fresh timeout.
-                    if self.repository.mark_join_request_manually_approved(chat_id, user_id, timestamp):
-                        await self._send_manual_join_welcome(chat_id, user_id)
-                        try:
-                            await self._start_group_challenge(
-                                chat_id=chat_id,
-                                user_id=user_id,
-                                username=None,
-                                verification_flow="join_request",
-                                started_at=current,
-                            )
-                        except Exception:
-                            logger.exception(
-                                "onboarding.manual_join_group_challenge_start_failed chat_id=%s user_id=%s",
-                                chat_id,
-                                user_id,
-                            )
-                    continue
-            # Claim the row before calling Telegram. This prevents a delayed timeout worker
-            # from removing a member an administrator has just approved.
-            if not self.repository.claim_expired_verification(chat_id, user_id, state, timestamp):
-                logger.info(
-                    "onboarding.expiry_skipped_already_resolved chat_id=%s user_id=%s flow=%s",
-                    chat_id,
-                    user_id,
-                    verification_flow,
-                )
-                continue
+        # A join-request flood can leave thousands of expired rows. Eight workers
+        # reduce recovery from roughly an hour to minutes while staying below
+        # Telegram's normal Bot API request budget.
+        semaphore = asyncio.Semaphore(8)
+
+        async def process(
+            record: tuple[int, int, str, OnboardingState, int | None]
+        ) -> int:
+            async with semaphore:
+                return await self._expire_pending_verification(record, current, timestamp)
+
+        return sum(await asyncio.gather(*(process(record) for record in expired)))
+
+    async def _expire_pending_verification(
+        self,
+        record: tuple[int, int, str, OnboardingState, int | None],
+        current: datetime,
+        timestamp: str,
+    ) -> int:
+        chat_id, user_id, verification_flow, state, message_id = record
+        if state is OnboardingState.VERIFICATION_PENDING and verification_flow == "join_request":
             try:
-                if state is OnboardingState.VERIFICATION_PENDING and verification_flow == "join_request":
-                    await self.gateway.decline_join_request(chat_id, user_id)
-                else:
-                    # The member is already in the group during the post-join challenge.
-                    await self.gateway.ban_member(chat_id, user_id)
+                already_joined = await self.gateway.is_group_member(chat_id, user_id)
             except Exception as error:
-                if self._is_terminal_expiry_error(error):
-                    if state is OnboardingState.VERIFICATION_PENDING and verification_flow == "join_request":
-                        finalized = self.repository.delete_onboarding_record(chat_id, user_id)
-                    else:
-                        finalized = self.repository.finalize_expired_verification(chat_id, user_id, timestamp)
-                    if finalized:
-                        completed += 1
-                        if state is OnboardingState.SECONDARY_VERIFICATION_PENDING:
-                            await self._replace_group_challenge_message(
-                                chat_id,
-                                message_id,
-                                user_id,
-                                self.GROUP_CHALLENGE_FAILURE_TEXT,
-                                delete_after_seconds=60,
-                            )
-                    logger.info(
-                        "onboarding.expiry_already_closed chat_id=%s user_id=%s flow=%s reason=%s",
-                        chat_id,
-                        user_id,
-                        verification_flow,
-                        error,
-                    )
-                    continue
-                self.repository.reopen_expired_verification(chat_id, user_id, state, timestamp)
-                logger.exception(
-                    "onboarding.expiry_action_failed chat_id=%s user_id=%s flow=%s",
+                # Membership is unknown. Never turn a failed read into a
+                # destructive decline: leave the row pending for the next cycle.
+                logger.warning(
+                    "onboarding.expiry_member_status_lookup_deferred chat_id=%s user_id=%s reason=%s",
                     chat_id,
                     user_id,
-                    verification_flow,
+                    error,
                 )
-                continue
+                return 0
+            if already_joined:
+                # The new-member event can be delayed or missed during a deployment.
+                # Do not reject an already approved member; convert them to the second
+                # stage instead, which gets its own fresh timeout.
+                if self.repository.mark_join_request_manually_approved(chat_id, user_id, timestamp):
+                    await self._send_manual_join_welcome(chat_id, user_id)
+                    try:
+                        await self._start_group_challenge(
+                            chat_id=chat_id,
+                            user_id=user_id,
+                            username=None,
+                            verification_flow="join_request",
+                            started_at=current,
+                        )
+                    except Exception:
+                        logger.exception(
+                            "onboarding.manual_join_group_challenge_start_failed chat_id=%s user_id=%s",
+                            chat_id,
+                            user_id,
+                        )
+                return 0
+        # Claim the row before calling Telegram. This prevents a delayed timeout worker
+        # from removing a member an administrator has just approved.
+        if not self.repository.claim_expired_verification(chat_id, user_id, state, timestamp):
+            logger.info(
+                "onboarding.expiry_skipped_already_resolved chat_id=%s user_id=%s flow=%s",
+                chat_id,
+                user_id,
+                verification_flow,
+            )
+            return 0
+        try:
             if state is OnboardingState.VERIFICATION_PENDING and verification_flow == "join_request":
-                finalized = self.repository.delete_onboarding_record(chat_id, user_id)
+                await self.gateway.decline_join_request(chat_id, user_id)
             else:
-                finalized = self.repository.finalize_expired_verification(chat_id, user_id, timestamp)
-            if finalized:
-                completed += 1
-                if state is OnboardingState.SECONDARY_VERIFICATION_PENDING:
+                # The member is already in the group during the post-join challenge.
+                await self.gateway.ban_member(chat_id, user_id)
+        except Exception as error:
+            if self._is_terminal_expiry_error(error):
+                finalized = self._finalize_expired_record(
+                    chat_id, user_id, verification_flow, state, timestamp
+                )
+                if finalized and state is OnboardingState.SECONDARY_VERIFICATION_PENDING:
                     await self._replace_group_challenge_message(
                         chat_id,
                         message_id,
@@ -851,12 +837,52 @@ class OnboardingService:
                         delete_after_seconds=60,
                     )
                 logger.info(
-                    "onboarding.expired chat_id=%s user_id=%s flow=%s",
+                    "onboarding.expiry_already_closed chat_id=%s user_id=%s flow=%s reason=%s",
                     chat_id,
                     user_id,
                     verification_flow,
+                    error,
                 )
-        return completed
+                return int(finalized)
+            self.repository.reopen_expired_verification(chat_id, user_id, state, timestamp)
+            logger.exception(
+                "onboarding.expiry_action_failed chat_id=%s user_id=%s flow=%s",
+                chat_id,
+                user_id,
+                verification_flow,
+            )
+            return 0
+        finalized = self._finalize_expired_record(
+            chat_id, user_id, verification_flow, state, timestamp
+        )
+        if finalized:
+            if state is OnboardingState.SECONDARY_VERIFICATION_PENDING:
+                await self._replace_group_challenge_message(
+                    chat_id,
+                    message_id,
+                    user_id,
+                    self.GROUP_CHALLENGE_FAILURE_TEXT,
+                    delete_after_seconds=60,
+                )
+            logger.info(
+                "onboarding.expired chat_id=%s user_id=%s flow=%s",
+                chat_id,
+                user_id,
+                verification_flow,
+            )
+        return int(finalized)
+
+    def _finalize_expired_record(
+        self,
+        chat_id: int,
+        user_id: int,
+        verification_flow: str,
+        state: OnboardingState,
+        timestamp: str,
+    ) -> bool:
+        if state is OnboardingState.VERIFICATION_PENDING and verification_flow == "join_request":
+            return self.repository.delete_onboarding_record(chat_id, user_id)
+        return self.repository.finalize_expired_verification(chat_id, user_id, timestamp)
 
     @staticmethod
     def _token_hash(token: str) -> str:
