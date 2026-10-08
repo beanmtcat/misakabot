@@ -35,6 +35,11 @@ class Settings:
     kimi_model: str = ""
     verification_ttl_minutes: int = 5
     secondary_verification_ttl_minutes: int = 2
+    join_guard_burst_per_minute: int = 10
+    join_guard_burst_per_five_minutes: int = 25
+    join_guard_lockdown_per_five_minutes: int = 100
+    join_guard_quiet_minutes: int = 120
+    join_guard_repeat_cooldown_hours: int = 24
     audit_api_host: str = "127.0.0.1"
     audit_api_port: int = 8080
     audit_web_app_url: str = ""
@@ -83,6 +88,17 @@ class Settings:
             verification_ttl_minutes=int(os.environ.get("JOIN_VERIFICATION_TTL_MINUTES", "5")),
             secondary_verification_ttl_minutes=int(
                 os.environ.get("SECONDARY_VERIFICATION_TTL_MINUTES", "2")
+            ),
+            join_guard_burst_per_minute=int(os.environ.get("JOIN_GUARD_BURST_PER_MINUTE", "10")),
+            join_guard_burst_per_five_minutes=int(
+                os.environ.get("JOIN_GUARD_BURST_PER_FIVE_MINUTES", "25")
+            ),
+            join_guard_lockdown_per_five_minutes=int(
+                os.environ.get("JOIN_GUARD_LOCKDOWN_PER_FIVE_MINUTES", "100")
+            ),
+            join_guard_quiet_minutes=int(os.environ.get("JOIN_GUARD_QUIET_MINUTES", "120")),
+            join_guard_repeat_cooldown_hours=int(
+                os.environ.get("JOIN_GUARD_REPEAT_COOLDOWN_HOURS", "24")
             ),
             audit_api_host=os.environ.get("AUDIT_API_HOST", "127.0.0.1"),
             audit_api_port=int(os.environ.get("AUDIT_API_PORT", "8080")),

@@ -89,6 +89,30 @@ class HandlerRoutingTests(unittest.IsolatedAsyncioTestCase):
         self.onboarding.start_direct_join.assert_awaited_once()
         self.service.moderate.assert_not_awaited()
 
+    async def test_join_request_preserves_telegram_timestamp_and_display_name(self) -> None:
+        requested_at = datetime(2026, 10, 8, 10, 30, tzinfo=timezone.utc)
+        update = Update.model_validate({
+            "update_id": 3,
+            "chat_join_request": {
+                "chat": {"id": -100, "type": "supergroup", "title": "测试群"},
+                "from": {
+                    "id": 55,
+                    "is_bot": False,
+                    "first_name": "SingleEnglish",
+                    "username": "applicant",
+                },
+                "user_chat_id": 5500,
+                "date": int(requested_at.timestamp()),
+            },
+        })
+
+        await self.dispatcher.feed_update(self.bot, update)
+
+        self.onboarding.start.assert_awaited_once()
+        request = self.onboarding.start.await_args.args[0]
+        self.assertEqual(request.requested_at, requested_at)
+        self.assertEqual(request.display_name, "SingleEnglish")
+
     async def test_private_and_disabled_group_messages_never_invoke_llm(self) -> None:
         await self.feed_message("猫猫 你好", chat_id=42)
         await self.feed_message("猫猫 你好", chat_id=-200)

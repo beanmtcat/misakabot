@@ -33,6 +33,7 @@ async def register_bot_commands(bot: Bot, allowed_group_ids: frozenset[int]) -> 
             [
                 BotCommand(command="audit", description="查看本群审计日志"),
                 BotCommand(command="unban", description="回复用户消息解除封禁"),
+                BotCommand(command="join_guard", description="查看或调整入群防护"),
                 BotCommand(command="memory", description="管理本群 AI 长期记忆"),
             ],
             scope=BotCommandScopeChatAdministrators(chat_id=chat_id),

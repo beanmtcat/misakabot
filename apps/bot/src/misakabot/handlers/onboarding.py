@@ -40,7 +40,9 @@ def build_onboarding_router(
                 user_chat_id=request.user_chat_id,
                 group_title=request.chat.title,
                 username=request.from_user.username,
+                display_name=request.from_user.full_name,
                 invite_link=request.invite_link.invite_link if request.invite_link else None,
+                requested_at=request.date,
             )
         )
 

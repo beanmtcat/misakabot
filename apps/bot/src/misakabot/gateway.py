@@ -351,6 +351,18 @@ class AiogramGateway:
             ),
         )
 
+    async def send_private_join_guard_alert(
+        self, admin_user_ids: frozenset[int], text: str
+    ) -> None:
+        for admin_user_id in admin_user_ids:
+            try:
+                await self.bot.send_message(admin_user_id, text)
+            except (TelegramBadRequest, TelegramForbiddenError):
+                logger.warning(
+                    "join_guard.admin_notice_unavailable admin_user_id=%s",
+                    admin_user_id,
+                )
+
     async def send_initial_verification_result(
         self,
         chat_id: int,

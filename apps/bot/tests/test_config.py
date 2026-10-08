@@ -64,6 +64,15 @@ class SettingsTests(unittest.TestCase):
         self.assertEqual(settings.verification_ttl_minutes, 5)
         self.assertEqual(settings.secondary_verification_ttl_minutes, 2)
 
+    def test_join_guard_defaults_keep_defense_until_two_quiet_hours(self) -> None:
+        with patch.dict(os.environ, {"TELEGRAM_BOT_TOKEN": "123:token"}, clear=True):
+            settings = Settings.from_environment()
+        self.assertEqual(settings.join_guard_burst_per_minute, 10)
+        self.assertEqual(settings.join_guard_burst_per_five_minutes, 25)
+        self.assertEqual(settings.join_guard_lockdown_per_five_minutes, 100)
+        self.assertEqual(settings.join_guard_quiet_minutes, 120)
+        self.assertEqual(settings.join_guard_repeat_cooldown_hours, 24)
+
     def test_parses_postgres_database_url(self) -> None:
         with patch.dict(
             os.environ,

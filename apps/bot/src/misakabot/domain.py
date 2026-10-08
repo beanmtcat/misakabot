@@ -50,6 +50,7 @@ class JoinRequestInput:
     user_chat_id: int
     group_title: str | None = None
     username: str | None = None
+    display_name: str | None = None
     invite_link: str | None = None
     requested_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 

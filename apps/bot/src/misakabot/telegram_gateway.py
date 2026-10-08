@@ -42,6 +42,10 @@ class TelegramGateway(Protocol):
         self, user_chat_id: int, verification_url: str, group_title: str | None
     ) -> None: ...
 
+    async def send_private_join_guard_alert(
+        self, admin_user_ids: frozenset[int], text: str
+    ) -> None: ...
+
     async def send_initial_verification_result(
         self,
         chat_id: int,

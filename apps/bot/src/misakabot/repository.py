@@ -171,6 +171,40 @@ class AuditRepository:
             )
             connection.execute(
                 """
+                CREATE TABLE IF NOT EXISTS join_request_events (
+                    chat_id INTEGER NOT NULL,
+                    user_id INTEGER NOT NULL,
+                    requested_at TEXT NOT NULL,
+                    display_name TEXT,
+                    username TEXT,
+                    invite_link TEXT,
+                    decision TEXT NOT NULL DEFAULT 'pending',
+                    reason TEXT,
+                    updated_at TEXT NOT NULL,
+                    PRIMARY KEY(chat_id, user_id, requested_at)
+                )
+                """
+            )
+            connection.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_join_request_events_chat_time
+                ON join_request_events(chat_id, requested_at)
+                """
+            )
+            connection.execute(
+                """
+                CREATE TABLE IF NOT EXISTS join_guard_state (
+                    chat_id INTEGER PRIMARY KEY,
+                    mode TEXT NOT NULL,
+                    defense_until TEXT,
+                    last_attack_at TEXT,
+                    last_notice_at TEXT,
+                    updated_at TEXT NOT NULL
+                )
+                """
+            )
+            connection.execute(
+                """
                 CREATE TABLE IF NOT EXISTS assistant_sessions (
                     chat_id INTEGER NOT NULL,
                     user_id INTEGER NOT NULL,
@@ -653,6 +687,133 @@ class AuditRepository:
                     OnboardingState.PENDING_FIRST_MESSAGE.value,
                     OnboardingState.OBSERVING.value,
                 ),
+            )
+            connection.commit()
+        return cursor.rowcount == 1
+
+    def record_join_request_event(
+        self,
+        *,
+        chat_id: int,
+        user_id: int,
+        requested_at: str,
+        display_name: str | None,
+        username: str | None,
+        invite_link: str | None,
+        now: str,
+    ) -> None:
+        with closing(self._connect()) as connection:
+            connection.execute(
+                """
+                INSERT INTO join_request_events(
+                    chat_id,user_id,requested_at,display_name,username,invite_link,
+                    decision,updated_at
+                ) VALUES (%s,%s,%s,%s,%s,%s,'pending',%s)
+                ON CONFLICT(chat_id,user_id,requested_at) DO UPDATE SET
+                    display_name=excluded.display_name,username=excluded.username,
+                    invite_link=excluded.invite_link,updated_at=excluded.updated_at
+                """,
+                (chat_id, user_id, requested_at, display_name, username, invite_link, now),
+            )
+            connection.commit()
+
+    def recent_join_request_names(self, chat_id: int, since: str, until: str) -> list[str]:
+        with closing(self._connect()) as connection:
+            rows = connection.execute(
+                """
+                SELECT COALESCE(display_name,'') FROM join_request_events
+                WHERE chat_id=%s AND requested_at >= %s AND requested_at <= %s
+                """,
+                (chat_id, since, until),
+            ).fetchall()
+        return [str(row[0]) for row in rows]
+
+    def has_recent_rejected_join_request(
+        self, chat_id: int, user_id: int, since: str
+    ) -> bool:
+        with closing(self._connect()) as connection:
+            row = connection.execute(
+                """
+                SELECT 1 FROM join_request_events
+                WHERE chat_id=%s AND user_id=%s AND requested_at >= %s
+                  AND decision='rejected'
+                LIMIT 1
+                """,
+                (chat_id, user_id, since),
+            ).fetchone()
+        return row is not None
+
+    def mark_join_request_event(
+        self,
+        chat_id: int,
+        user_id: int,
+        requested_at: str,
+        decision: str,
+        reason: str,
+        now: str,
+    ) -> None:
+        with closing(self._connect()) as connection:
+            connection.execute(
+                """
+                UPDATE join_request_events SET decision=%s,reason=%s,updated_at=%s
+                WHERE chat_id=%s AND user_id=%s AND requested_at=%s
+                """,
+                (decision, reason, now, chat_id, user_id, requested_at),
+            )
+            connection.commit()
+
+    def join_guard_state(self, chat_id: int) -> tuple[str, str | None, str | None, str | None]:
+        with closing(self._connect()) as connection:
+            row = connection.execute(
+                """
+                SELECT mode,defense_until,last_attack_at,last_notice_at
+                FROM join_guard_state WHERE chat_id=%s
+                """,
+                (chat_id,),
+            ).fetchone()
+        if row is None:
+            return "normal", None, None, None
+        return str(row[0]), row[1], row[2], row[3]
+
+    def save_join_guard_state(
+        self,
+        chat_id: int,
+        mode: str,
+        defense_until: str | None,
+        last_attack_at: str | None,
+        now: str,
+    ) -> None:
+        with closing(self._connect()) as connection:
+            connection.execute(
+                """
+                INSERT INTO join_guard_state(
+                    chat_id,mode,defense_until,last_attack_at,updated_at
+                ) VALUES (%s,%s,%s,%s,%s)
+                ON CONFLICT(chat_id) DO UPDATE SET
+                    mode=excluded.mode,defense_until=excluded.defense_until,
+                    last_attack_at=excluded.last_attack_at,updated_at=excluded.updated_at
+                """,
+                (chat_id, mode, defense_until, last_attack_at, now),
+            )
+            connection.commit()
+
+    def claim_join_guard_notice(self, chat_id: int, now: str, due_before: str) -> bool:
+        with closing(self._connect()) as connection:
+            cursor = connection.execute(
+                """
+                UPDATE join_guard_state SET last_notice_at=%s,updated_at=%s
+                WHERE chat_id=%s AND (last_notice_at IS NULL OR last_notice_at <= %s)
+                """,
+                (now, now, chat_id, due_before),
+            )
+            connection.commit()
+        return cursor.rowcount == 1
+
+    def delete_onboarding_record(self, chat_id: int, user_id: int) -> bool:
+        with closing(self._connect()) as connection:
+            cursor = connection.execute(
+                "DELETE FROM member_onboarding WHERE chat_id=%s AND user_id=%s",
+                (chat_id, user_id),
             )
             connection.commit()
         return cursor.rowcount == 1
@@ -1280,6 +1441,28 @@ CREATE TABLE IF NOT EXISTS member_first_observations (
     user_id BIGINT NOT NULL,
     first_message_at TIMESTAMPTZ NOT NULL,
     PRIMARY KEY(chat_id, user_id)
+);
+CREATE TABLE IF NOT EXISTS join_request_events (
+    chat_id BIGINT NOT NULL,
+    user_id BIGINT NOT NULL,
+    requested_at TIMESTAMPTZ NOT NULL,
+    display_name TEXT,
+    username TEXT,
+    invite_link TEXT,
+    decision TEXT NOT NULL DEFAULT 'pending',
+    reason TEXT,
+    updated_at TIMESTAMPTZ NOT NULL,
+    PRIMARY KEY(chat_id, user_id, requested_at)
+);
+CREATE INDEX IF NOT EXISTS idx_join_request_events_chat_time
+    ON join_request_events(chat_id, requested_at);
+CREATE TABLE IF NOT EXISTS join_guard_state (
+    chat_id BIGINT PRIMARY KEY,
+    mode TEXT NOT NULL,
+    defense_until TIMESTAMPTZ,
+    last_attack_at TIMESTAMPTZ,
+    last_notice_at TIMESTAMPTZ,
+    updated_at TIMESTAMPTZ NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_moderation_events_chat_action_id
     ON moderation_events(chat_id, action, id DESC);

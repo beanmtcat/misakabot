@@ -10,6 +10,7 @@ from datetime import datetime, timedelta, timezone
 from urllib.parse import urlencode
 
 from .domain import DirectJoinInput, JoinRequestInput, JoinVerificationOutcome, OnboardingState
+from .join_guard import JoinGuard, JoinGuardDecision, JoinGuardMode, JoinGuardPolicy
 from .repository import AuditRepository
 from .telegram_gateway import TelegramGateway
 
@@ -166,6 +167,8 @@ class OnboardingService:
         join_verify_url: str = "",
         secondary_verification_ttl_minutes: int = 2,
         welcome_channel_url_by_group: Mapping[int, str] | None = None,
+        join_guard_policy: JoinGuardPolicy | None = None,
+        admin_user_ids: frozenset[int] = frozenset(),
     ) -> None:
         self.repository = repository
         self.gateway = gateway
@@ -173,8 +176,39 @@ class OnboardingService:
         self.secondary_verification_ttl_minutes = secondary_verification_ttl_minutes
         self.join_verify_url = join_verify_url.rstrip("/") + "/" if join_verify_url else ""
         self.welcome_channel_url_by_group = dict(welcome_channel_url_by_group or {})
+        self.join_guard = JoinGuard(repository, join_guard_policy or JoinGuardPolicy())
+        self.admin_user_ids = admin_user_ids
 
     async def start(self, request: JoinRequestInput) -> PendingJoin:
+        guard = self.join_guard.evaluate(request)
+        if guard.notify_admins:
+            await self._notify_join_guard(request, guard)
+        if guard.reject:
+            try:
+                await self.gateway.decline_join_request(request.chat_id, request.user_id)
+            except Exception as error:
+                # Replayed Telegram updates frequently refer to a requester that is
+                # already gone. Treat those terminal responses as successfully
+                # closed so the webhook is acknowledged instead of retried forever.
+                if not self._is_terminal_expiry_error(error):
+                    raise
+                logger.info(
+                    "join_guard.request_already_closed chat_id=%s user_id=%s reason=%s",
+                    request.chat_id,
+                    request.user_id,
+                    error,
+                )
+            logger.warning(
+                "join_guard.request_rejected chat_id=%s user_id=%s mode=%s reason=%s "
+                "one_minute=%s five_minutes=%s",
+                request.chat_id,
+                request.user_id,
+                guard.mode,
+                guard.reason,
+                guard.one_minute_count,
+                guard.five_minute_count,
+            )
+            return PendingJoin(OnboardingState.DECLINED, None)
         if self.repository.is_user_blocked(request.user_id):
             await self.gateway.decline_join_request(request.chat_id, request.user_id)
             logger.warning("onboarding.blocked_user_declined chat_id=%s user_id=%s", request.chat_id, request.user_id)
@@ -251,6 +285,38 @@ class OnboardingService:
             request.chat_id, request.user_id, self.verification_ttl_minutes,
         )
         return PendingJoin(OnboardingState.VERIFICATION_PENDING, verification_url)
+
+    async def _notify_join_guard(
+        self, request: JoinRequestInput, decision: JoinGuardDecision
+    ) -> None:
+        if not self.admin_user_ids:
+            return
+        mode = {
+            JoinGuardMode.HIGH: "高防",
+            JoinGuardMode.LOCKDOWN: "完全封锁",
+            JoinGuardMode.PERMANENT_HIGH: "永久高防",
+            JoinGuardMode.PERMANENT_LOCKDOWN: "永久完全封锁",
+        }.get(decision.mode, "正常")
+        try:
+            await self.gateway.send_private_join_guard_alert(
+                self.admin_user_ids,
+                (
+                    f"🛡 入群防护：{mode}\n"
+                    f"群组：{request.group_title or request.chat_id}\n"
+                    f"最近 1 分钟：{decision.one_minute_count}\n"
+                    f"最近 5 分钟：{decision.five_minute_count}\n"
+                    f"纯英文单词昵称占比：{decision.suspicious_name_ratio:.0%}\n\n"
+                    "邀请链接保持不变；可在群内使用 /join_guard 查看或调整。"
+                ),
+            )
+        except Exception:
+            logger.exception("join_guard.admin_notice_failed chat_id=%s", request.chat_id)
+
+    def set_join_guard_mode(self, chat_id: int, mode: JoinGuardMode) -> None:
+        self.join_guard.set_mode(chat_id, mode)
+
+    def join_guard_status(self, chat_id: int) -> tuple[JoinGuardMode, datetime | None]:
+        return self.join_guard.status(chat_id)
 
     def mark_member_departed(self, chat_id: int, user_id: int, departed_at: datetime) -> bool:
         """Forget in-group verification state when a member voluntarily leaves."""
@@ -740,13 +806,13 @@ class OnboardingService:
                     await self.gateway.ban_member(chat_id, user_id)
             except Exception as error:
                 if self._is_terminal_expiry_error(error):
-                    if self.repository.finalize_expired_verification(chat_id, user_id, timestamp):
+                    if state is OnboardingState.VERIFICATION_PENDING and verification_flow == "join_request":
+                        finalized = self.repository.delete_onboarding_record(chat_id, user_id)
+                    else:
+                        finalized = self.repository.finalize_expired_verification(chat_id, user_id, timestamp)
+                    if finalized:
                         completed += 1
-                        if state is OnboardingState.VERIFICATION_PENDING and verification_flow == "join_request":
-                            await self._send_initial_verification_result(
-                                chat_id, user_id, self.INITIAL_VERIFICATION_TIMEOUT_TEXT, delete_after_seconds=60
-                            )
-                        elif state is OnboardingState.SECONDARY_VERIFICATION_PENDING:
+                        if state is OnboardingState.SECONDARY_VERIFICATION_PENDING:
                             await self._replace_group_challenge_message(
                                 chat_id,
                                 message_id,
@@ -770,13 +836,13 @@ class OnboardingService:
                     verification_flow,
                 )
                 continue
-            if self.repository.finalize_expired_verification(chat_id, user_id, timestamp):
+            if state is OnboardingState.VERIFICATION_PENDING and verification_flow == "join_request":
+                finalized = self.repository.delete_onboarding_record(chat_id, user_id)
+            else:
+                finalized = self.repository.finalize_expired_verification(chat_id, user_id, timestamp)
+            if finalized:
                 completed += 1
-                if state is OnboardingState.VERIFICATION_PENDING and verification_flow == "join_request":
-                    await self._send_initial_verification_result(
-                        chat_id, user_id, self.INITIAL_VERIFICATION_TIMEOUT_TEXT, delete_after_seconds=60
-                    )
-                elif state is OnboardingState.SECONDARY_VERIFICATION_PENDING:
+                if state is OnboardingState.SECONDARY_VERIFICATION_PENDING:
                     await self._replace_group_challenge_message(
                         chat_id,
                         message_id,

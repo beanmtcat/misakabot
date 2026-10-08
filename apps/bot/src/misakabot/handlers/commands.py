@@ -9,6 +9,7 @@ from aiogram.filters import Command
 from aiogram.types import CallbackQuery, Message
 
 from ..group_reply import GroupReplyService
+from ..join_guard import JoinGuardMode
 from ..onboarding import OnboardingService
 from ..service import ModerationService
 from .admin import AdminActions
@@ -102,6 +103,45 @@ def build_command_router(
             message.chat.id,
             message.from_user.id,
         )
+
+    @router.message(Command("join_guard"))
+    async def join_guard_command(message: Message) -> None:
+        if (
+            message.from_user is None
+            or message.chat.type not in {"group", "supergroup"}
+            or message.chat.id not in allowed_group_ids
+        ):
+            return
+        if not await is_authorized_admin(message.chat.id, message.from_user.id):
+            logger.warning(
+                "join_guard.command_denied chat_id=%s actor_user_id=%s",
+                message.chat.id,
+                message.from_user.id,
+            )
+            return
+        argument = ((message.text or "").split(maxsplit=1)[1:] or [""])[0].strip().casefold()
+        requested_mode = {
+            "auto": JoinGuardMode.NORMAL,
+            "off": JoinGuardMode.NORMAL,
+            "high": JoinGuardMode.PERMANENT_HIGH,
+            "on": JoinGuardMode.PERMANENT_HIGH,
+            "lockdown": JoinGuardMode.PERMANENT_LOCKDOWN,
+        }.get(argument)
+        if argument and requested_mode is None:
+            await message.answer("用法：/join_guard、/join_guard auto、/join_guard high、/join_guard lockdown")
+            return
+        if requested_mode is not None:
+            onboarding.set_join_guard_mode(message.chat.id, requested_mode)
+        mode, defense_until = onboarding.join_guard_status(message.chat.id)
+        labels = {
+            JoinGuardMode.NORMAL: "自动防护（当前正常）",
+            JoinGuardMode.HIGH: "自动高防",
+            JoinGuardMode.LOCKDOWN: "自动完全封锁",
+            JoinGuardMode.PERMANENT_HIGH: "手动高防",
+            JoinGuardMode.PERMANENT_LOCKDOWN: "手动完全封锁",
+        }
+        expiry = f"\n预计结束：{defense_until.astimezone().strftime('%Y-%m-%d %H:%M:%S')}" if defense_until else ""
+        await message.answer(f"当前入群防护：{labels[mode]}{expiry}")
 
     @router.message(Command("memory"))
     async def memory_command(message: Message) -> None:

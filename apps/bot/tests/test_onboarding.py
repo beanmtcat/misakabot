@@ -28,6 +28,7 @@ class FakeGateway:
         self.initial_verification_results: list[tuple[int, int, str]] = []
         self.initial_result_delete_after: list[int | None] = []
         self.manual_join_welcomes: list[tuple[int, int]] = []
+        self.join_guard_alerts: list[tuple[frozenset[int], str]] = []
         self.group_members: set[tuple[int, int]] = set()
 
     async def approve_join_request(self, chat_id: int, user_id: int) -> None:
@@ -41,6 +42,11 @@ class FakeGateway:
         self, user_chat_id: int, callback_data: str, group_title: str | None
     ) -> None:
         self.verifications.append((user_chat_id, callback_data, group_title))
+
+    async def send_private_join_guard_alert(
+        self, admin_user_ids: frozenset[int], text: str
+    ) -> None:
+        self.join_guard_alerts.append((admin_user_ids, text))
 
     async def send_group_vps_challenge(
         self,
@@ -457,17 +463,18 @@ class OnboardingServiceTests(unittest.TestCase):
             chat_id=-100123,
             user_id=77,
             user_chat_id=7700,
-            requested_at=now - timedelta(minutes=11),
+            requested_at=now,
         )
         asyncio.run(self.service.start(expired_request))
+        expiry_check_at = now + timedelta(minutes=6)
 
-        expired_count = asyncio.run(self.service.expire_pending_verifications(now))
+        expired_count = asyncio.run(self.service.expire_pending_verifications(expiry_check_at))
 
         self.assertEqual(expired_count, 1)
         self.assertEqual(self.gateway.declined, [(-100123, 77)])
-        self.assertIn("申请已超时", self.gateway.initial_verification_results[-1][2])
-        self.assertEqual(self.gateway.initial_result_delete_after[-1], 60)
-        self.assertEqual(asyncio.run(self.service.expire_pending_verifications(now)), 0)
+        self.assertEqual(self.gateway.initial_verification_results, [])
+        self.assertIsNone(self.repository.onboarding_state(-100123, 77))
+        self.assertEqual(asyncio.run(self.service.expire_pending_verifications(expiry_check_at)), 0)
 
     def test_admin_approval_wins_over_a_stale_timeout_worker_read(self) -> None:
         """A timeout worker must not ban someone after their group challenge was approved."""
@@ -522,12 +529,12 @@ class OnboardingServiceTests(unittest.TestCase):
             chat_id=-100123,
             user_id=93,
             user_chat_id=9300,
-            requested_at=now - timedelta(minutes=11),
+            requested_at=now,
         )
         asyncio.run(self.service.start(request))
         self.gateway.group_members.add((-100123, 93))
 
-        completed = asyncio.run(self.service.expire_pending_verifications(now))
+        completed = asyncio.run(self.service.expire_pending_verifications(now + timedelta(minutes=6)))
 
         self.assertEqual(completed, 0)
         self.assertEqual(self.gateway.declined, [])
@@ -547,11 +554,11 @@ class OnboardingServiceTests(unittest.TestCase):
             chat_id=-100123,
             user_id=94,
             user_chat_id=9400,
-            requested_at=now - timedelta(minutes=11),
+            requested_at=now,
         )
         asyncio.run(self.service.start(request))
 
-        completed = asyncio.run(self.service.expire_pending_verifications(now))
+        completed = asyncio.run(self.service.expire_pending_verifications(now + timedelta(minutes=6)))
 
         self.assertEqual(completed, 0)
         self.assertEqual(self.gateway.declined, [])
@@ -569,12 +576,15 @@ class OnboardingServiceTests(unittest.TestCase):
             chat_id=-100123,
             user_id=78,
             user_chat_id=7800,
-            requested_at=now - timedelta(minutes=11),
+            requested_at=now,
         )
         asyncio.run(self.service.start(expired_request))
 
-        self.assertEqual(asyncio.run(self.service.expire_pending_verifications(now)), 1)
-        self.assertEqual(asyncio.run(self.service.expire_pending_verifications(now)), 0)
+        expiry_check_at = now + timedelta(minutes=6)
+        self.assertEqual(asyncio.run(self.service.expire_pending_verifications(expiry_check_at)), 1)
+        self.assertEqual(asyncio.run(self.service.expire_pending_verifications(expiry_check_at)), 0)
+        self.assertEqual(self.gateway.initial_verification_results, [])
+        self.assertIsNone(self.repository.onboarding_state(-100123, 78))
 
     def test_missing_hidden_requester_expiry_is_closed_without_retrying(self) -> None:
         now = datetime.now(timezone.utc)
@@ -586,12 +596,33 @@ class OnboardingServiceTests(unittest.TestCase):
             chat_id=-100123,
             user_id=79,
             user_chat_id=7900,
-            requested_at=now - timedelta(minutes=11),
+            requested_at=now,
         )
         asyncio.run(self.service.start(expired_request))
 
-        self.assertEqual(asyncio.run(self.service.expire_pending_verifications(now)), 1)
-        self.assertEqual(asyncio.run(self.service.expire_pending_verifications(now)), 0)
+        expiry_check_at = now + timedelta(minutes=6)
+        self.assertEqual(asyncio.run(self.service.expire_pending_verifications(expiry_check_at)), 1)
+        self.assertEqual(asyncio.run(self.service.expire_pending_verifications(expiry_check_at)), 0)
+        self.assertEqual(self.gateway.initial_verification_results, [])
+        self.assertIsNone(self.repository.onboarding_state(-100123, 79))
+
+    def test_stale_replayed_join_request_with_missing_requester_is_acknowledged(self) -> None:
+        now = datetime.now(timezone.utc)
+        self.gateway = MissingHiddenRequesterGateway()
+        self.service = OnboardingService(
+            self.repository, self.gateway, join_verify_url="https://dashboard.example/join-verify"
+        )
+        replayed = JoinRequestInput(
+            chat_id=-100123,
+            user_id=80,
+            user_chat_id=8000,
+            requested_at=now - timedelta(hours=1),
+        )
+
+        outcome = asyncio.run(self.service.start(replayed))
+
+        self.assertEqual(outcome.state, OnboardingState.DECLINED)
+        self.assertIsNone(self.repository.onboarding_state(-100123, 80))
 
     def test_expired_direct_join_is_banned(self) -> None:
         now = datetime.now(timezone.utc)

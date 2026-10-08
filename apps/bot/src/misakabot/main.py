@@ -20,6 +20,7 @@ from .llm import (
     OpenAICompatibleModerationClient,
     RuleBasedModerationClient,
 )
+from .join_guard import JoinGuardPolicy
 from .onboarding import OnboardingService
 from .repository import PostgresAuditRepository
 from .service import ModerationService
@@ -104,6 +105,14 @@ async def run_bot(settings: Settings) -> None:
             for chat_id in settings.dmit_channel_group_ids
             if settings.dmit_news_channel_url
         },
+        JoinGuardPolicy(
+            burst_per_minute=settings.join_guard_burst_per_minute,
+            burst_per_five_minutes=settings.join_guard_burst_per_five_minutes,
+            lockdown_per_five_minutes=settings.join_guard_lockdown_per_five_minutes,
+            quiet_minutes=settings.join_guard_quiet_minutes,
+            repeat_cooldown_hours=settings.join_guard_repeat_cooldown_hours,
+        ),
+        settings.admin_user_ids,
     )
     await onboarding.resume_pending_direct_join_challenges(settings.allowed_group_ids)
     await onboarding.resume_undelivered_group_challenges(settings.allowed_group_ids)
