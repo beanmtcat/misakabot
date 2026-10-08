@@ -718,9 +718,17 @@ class OnboardingService:
                 if text == self.GROUP_CHALLENGE_WELCOME_TEXT
                 else None,
             )
-        except Exception:
+        except Exception as error:
             # The Telegram action must not be considered failed only because an old challenge
             # message was removed by another moderator.
+            if "message to edit not found" in str(error).lower():
+                logger.info(
+                    "onboarding.group_challenge_message_already_removed "
+                    "chat_id=%s message_id=%s",
+                    chat_id,
+                    message_id,
+                )
+                return
             logger.exception(
                 "onboarding.group_challenge_message_replace_failed chat_id=%s message_id=%s",
                 chat_id,
