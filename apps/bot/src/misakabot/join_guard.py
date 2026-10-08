@@ -9,7 +9,11 @@ from .domain import JoinRequestInput
 from .repository import AuditRepository
 
 
-_SINGLE_ASCII_NAME = re.compile(r"[A-Za-z]{4,20}").fullmatch
+# Flood accounts commonly use a single generated Latin name, including very
+# short values such as ``hal`` and ``luc``. Length is deliberately not used as
+# an escape hatch; this signal is only enforced after the group has entered
+# high defense, so ordinary traffic does not get rejected on the name alone.
+_SINGLE_ASCII_NAME = re.compile(r"[A-Za-z]{1,64}").fullmatch
 
 
 class JoinGuardMode(StrEnum):

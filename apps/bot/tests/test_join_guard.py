@@ -68,6 +68,16 @@ class JoinGuardTests(unittest.TestCase):
         self.assertEqual(mode, JoinGuardMode.HIGH)
         self.assertEqual(defense_until, continued_at + timedelta(minutes=120))
 
+    def test_short_ascii_name_cannot_bypass_high_defense(self) -> None:
+        for user_id, name in enumerate(("durham", "metcalf", "simpson"), start=1):
+            self.guard.evaluate(self.request(user_id, name), self.now)
+
+        decision = self.guard.evaluate(self.request(4, "hal", self.now), self.now)
+
+        self.assertEqual(decision.mode, JoinGuardMode.HIGH)
+        self.assertTrue(decision.reject)
+        self.assertEqual(decision.reason, "high_risk_name_cohort")
+
     def test_high_defense_does_not_reject_unrelated_name(self) -> None:
         for user_id, name in enumerate(("durham", "metcalf", "simpson"), start=1):
             self.guard.evaluate(self.request(user_id, name), self.now)
