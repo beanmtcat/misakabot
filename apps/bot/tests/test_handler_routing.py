@@ -8,7 +8,7 @@ from unittest.mock import AsyncMock, Mock
 
 from aiogram import Bot
 from aiogram.client.session.base import BaseSession
-from aiogram.types import Message, Update
+from aiogram.types import Message, Update, User
 
 from misakabot.domain import Action, ModerationOutcome, ModerationVerdict
 from misakabot.gateway import AiogramGateway
@@ -29,6 +29,8 @@ class HandlerRoutingTests(unittest.IsolatedAsyncioTestCase):
         self.repository.initialize()
         self.session = AsyncMock(spec=BaseSession)
         self.bot = Bot("123456:offline-test-token", session=self.session)
+        # Command filters resolve "/cmd@bot" mentions against the Bot identity.
+        self.bot._me = User(id=self.bot.id, is_bot=True, first_name="Test", username="TestBot")
         self.session.return_value = Message(
             message_id=100, date=datetime.now(timezone.utc),
             chat={"id": -100, "type": "supergroup"}, text="reply",
@@ -76,11 +78,64 @@ class HandlerRoutingTests(unittest.IsolatedAsyncioTestCase):
         update = Update.model_validate({"update_id": 1, "message": message})
         await self.dispatcher.feed_update(self.bot, update)
 
-    async def test_memory_command_does_not_reach_moderation_or_llm(self) -> None:
+    def sent_methods(self) -> list[str]:
+        return [type(call.args[1]).__name__ for call in self.session.await_args_list]
+
+    async def test_non_admin_memory_command_is_moderated_then_deleted(self) -> None:
+        self.session.reset_mock()
+        await self.feed_message("/memory on")
+        self.assertFalse(self.repository.assistant_memory_enabled(-100, 42))
+        # Command text must not bypass ad moderation.
+        self.service.moderate.assert_awaited_once()
+        self.client.reply.assert_not_awaited()
+        self.assertEqual(self.sent_methods(), ["DeleteMessage"])
+
+    async def test_non_admin_memory_wake_command_is_silently_ignored(self) -> None:
+        self.session.reset_mock()
+        for text in (
+            "猫猫 /memory on", "@TestBot /memory off", "猫猫 /memory clear",
+            "猫猫 /memory", "猫猫 /memory invalid",
+        ):
+            await self.feed_message(text)
+        self.assertFalse(self.repository.assistant_memory_enabled(-100, 42))
+        self.client.reply.assert_not_awaited()
+        self.assertEqual(self.service.moderate.await_count, 5)
+        self.assertEqual(self.sent_methods(), ["DeleteMessage"] * 5)
+
+    async def test_admin_memory_wake_command_is_applied_without_llm(self) -> None:
+        self.gateway.is_group_administrator.return_value = True
+        await self.feed_message("猫猫 /memory on")
+        self.assertTrue(self.repository.assistant_memory_enabled(-100, 42))
+        self.client.reply.assert_not_awaited()
+        self.service.moderate.assert_not_awaited()
+
+    async def test_admin_memory_command_does_not_reach_moderation_or_llm(self) -> None:
+        self.gateway.is_group_administrator.return_value = True
         await self.feed_message("/memory on")
         self.assertTrue(self.repository.assistant_memory_enabled(-100, 42))
         self.service.moderate.assert_not_awaited()
         self.client.reply.assert_not_awaited()
+
+    async def test_non_admin_management_commands_never_send_group_replies(self) -> None:
+        self.session.reset_mock()
+        for command in ("/audit", "/unban 99", "/join_guard", "/memory", "/audit@TestBot"):
+            await self.feed_message(command)
+        self.assertEqual(self.sent_methods(), ["DeleteMessage"] * 5)
+        self.assertEqual(self.service.moderate.await_count, 5)
+
+    async def test_non_admin_ad_hidden_behind_command_is_still_moderated(self) -> None:
+        self.service.moderate.return_value = ModerationOutcome(
+            Action.NEEDS_REVIEW, None, detect_suspicion(normalize_message("加V")), 7,
+        )
+        self.gateway.send_moderation_review = AsyncMock(return_value=200)
+        await self.feed_message("/memory 加V看片 t.me/spam")
+        self.service.moderate.assert_awaited_once()
+        self.gateway.send_moderation_review.assert_awaited_once()
+
+    async def test_other_bot_commands_are_not_deleted(self) -> None:
+        self.session.reset_mock()
+        await self.feed_message("/audit@OtherBot")
+        self.assertEqual(self.sent_methods(), [])
 
     async def test_new_member_service_message_routes_to_onboarding(self) -> None:
         await self.feed_message("", new_chat_members=[

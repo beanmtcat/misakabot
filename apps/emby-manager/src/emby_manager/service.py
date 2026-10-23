@@ -28,6 +28,9 @@ _VIDEO_SUFFIXES = frozenset({
 
 
 class EmbyManagementService:
+    # Below this count a majority-missing result is plausible (small libraries).
+    _MISSING_SERIES_GUARD_MIN = 5
+
     def __init__(
         self,
         repository: LegacyEmbyRepository,
@@ -286,11 +289,20 @@ class EmbyManagementService:
                             isinstance(error, httpx.HTTPStatusError)
                             and error.response.status_code == 404
                         )
-                        logger.warning(
-                            "series_tracking_season_lookup_failed series_id=%s tmdb_id=%s season=%s",
-                            series_id, tmdb_id, season_number,
-                            exc_info=not expected_missing_season,
-                        )
+                        if expected_missing_season:
+                            logger.info(
+                                "series_tracking_season_missing series_id=%s tmdb_id=%s season=%s",
+                                series_id, tmdb_id, season_number,
+                            )
+                        else:
+                            logger.warning(
+                                "series_tracking_season_lookup_failed "
+                                "series_id=%s tmdb_id=%s season=%s",
+                                series_id,
+                                tmdb_id,
+                                season_number,
+                                exc_info=True,
+                            )
                 self._repository.save_tracking_metadata(series_id, **snapshot)
                 updated += 1
             except (httpx.HTTPError, RuntimeError, ValueError):
@@ -364,9 +376,26 @@ class EmbyManagementService:
             else:
                 skipped += 1
         tracked_ids = self._repository.tracked_emby_series_ids()
+        episode_payloads, missing_series_ids = await self._client.list_episodes_for_series(
+            tracked_ids
+        )
+        if (
+            len(missing_series_ids) >= self._MISSING_SERIES_GUARD_MIN
+            and len(missing_series_ids) * 2 > len(tracked_ids)
+        ):
+            # Losing most of the library at once points to a misconfigured Emby or
+            # library path, not real deletions. Refuse to stop tracking everything.
+            raise RuntimeError(
+                f"Emby 报告 {len(missing_series_ids)}/{len(tracked_ids)} 部追更剧集不存在，"
+                "已中止同步以免误归档，请检查 Emby 配置"
+            )
+        missing = self._repository.invalidate_missing_emby_series(missing_series_ids)
+        synchronized_ids = [
+            series_id for series_id in tracked_ids if series_id not in missing_series_ids
+        ]
         episodes = self._repository.upsert_emby_episodes(
-            await self._client.list_episodes_for_series(tracked_ids),
-            tracked_ids,
+            episode_payloads,
+            synchronized_ids,
         )
         missing_metadata_ids = self._repository.episode_ids_missing_parent_metadata()
         metadata_backfill = {"synced": 0, "skipped": 0, "invalidated": 0}
@@ -388,16 +417,21 @@ class EmbyManagementService:
             "episode_invalidated": episodes["invalidated"],
             "episode_metadata_backfilled": metadata_backfill["synced"],
             "episode_missing_invalidated": missing_invalidated,
+            "missing_series_invalidated": missing["series"],
+            "missing_series_episodes_invalidated": missing["episodes"],
         }
 
     async def sync_one_series(self, series_id: int) -> dict[str, object]:
         if series_id <= 0:
             raise ValueError("该剧集尚未关联 Emby，无法单独同步")
         action = self._repository.upsert_emby_series(await self._client.get_series(series_id))
-        episodes = self._repository.upsert_emby_episodes(
-            await self._client.list_episodes_for_series([series_id]),
-            [series_id],
+        episode_payloads, missing_series_ids = await self._client.list_episodes_for_series(
+            [series_id]
         )
+        if missing_series_ids:
+            self._repository.invalidate_missing_emby_series(missing_series_ids)
+            raise ValueError("该剧集已不存在于 Emby")
+        episodes = self._repository.upsert_emby_episodes(episode_payloads, [series_id])
         result: dict[str, object] = {
             "action": action,
             "episodes": episodes["synced"],

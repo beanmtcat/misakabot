@@ -908,6 +908,30 @@ class LegacyEmbyRepository:
         )
         return [int(row["id"]) for row in rows]
 
+    def invalidate_missing_emby_series(self, series_ids: Iterable[int]) -> dict[str, int]:
+        """Archive tracked rows that Emby confirms no longer exist."""
+        ids = sorted({
+            series_id
+            for value in series_ids
+            if (series_id := _positive_int(value)) is not None
+        })
+        if not ids:
+            return {"series": 0, "episodes": 0}
+        with closing(psycopg.connect(self._database_url)) as connection:
+            with connection.transaction():
+                series = connection.execute(
+                    '''UPDATE dragonli_emby_series
+                    SET isvalid=0,"update"=FALSE,mtime=NOW()
+                    WHERE isvalid=1 AND id = ANY(%s)''',
+                    (ids,),
+                ).rowcount
+                episodes = connection.execute(
+                    '''UPDATE dragonli_emby_episodes SET isvalid=0,mtime=NOW()
+                    WHERE isvalid=1 AND series_id = ANY(%s)''',
+                    (ids,),
+                ).rowcount
+        return {"series": series, "episodes": episodes}
+
     def list_tracked_series(self) -> list[dict[str, object]]:
         return self._all(
             '''SELECT s.id::text AS id,s.name,s.themoviedb,s.lock_season,s.season_number,

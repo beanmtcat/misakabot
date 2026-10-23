@@ -4,6 +4,7 @@ import logging
 from datetime import datetime, timezone
 
 from aiogram import F, Router
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import CallbackQuery
 
 from ..domain import Action, ReviewStatus
@@ -46,6 +47,7 @@ def build_moderation_router(
             return
 
         if decision == "ban":
+            source_deleted = True
             try:
                 await service.gateway.ban_member(chat_id, target.user_id)
             except Exception:
@@ -58,7 +60,26 @@ def build_moderation_router(
                 return
             try:
                 await service.gateway.delete_message(chat_id, target.message_id)
+            except TelegramBadRequest as error:
+                source_deleted = False
+                if "message to delete not found" in str(error).casefold():
+                    logger.info(
+                        "moderation.review_source_already_absent "
+                        "event_id=%s chat_id=%s message_id=%s",
+                        event_id,
+                        chat_id,
+                        target.message_id,
+                    )
+                else:
+                    logger.exception(
+                        "moderation.review_source_delete_failed "
+                        "event_id=%s chat_id=%s message_id=%s",
+                        event_id,
+                        chat_id,
+                        target.message_id,
+                    )
             except Exception:
+                source_deleted = False
                 # The account is already banned; leave the audit decision final even if Telegram
                 # no longer permits deletion of the original post.
                 logger.exception(
@@ -71,7 +92,11 @@ def build_moderation_router(
                 Action.PERMANENT_BAN, ReviewStatus.CONFIRMED, now,
             )
             replacement = "🚫 管理员已确认广告，账号已封禁。"
-            callback_text = "已封禁并移除原消息。"
+            callback_text = (
+                "已封禁并移除原消息。"
+                if source_deleted
+                else "已封禁；原消息已不存在或无法删除。"
+            )
         else:
             service.repository.complete_moderation_review(
                 event_id, chat_id, callback.from_user.id,

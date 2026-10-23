@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+from collections.abc import Awaitable, Callable
 from contextlib import suppress
 from datetime import datetime, timezone
 
@@ -18,6 +19,7 @@ logger = logging.getLogger(__name__)
 logger.addHandler(logging.NullHandler())
 
 BOT_WAKE_WORDS = ("猫猫",)
+AdminChecker = Callable[[int, int], Awaitable[bool]]
 
 def _message_text(message: Message) -> str:
     """Return the user-visible text that is safe to send as short LLM context."""
@@ -91,6 +93,7 @@ class GroupReplyService:
         bot_user_id: int | None,
         bot_username: str | None,
         knowledge_group_ids: frozenset[int],
+        is_authorized_admin: AdminChecker | None = None,
     ) -> None:
         self.bot = bot
         self.repository = repository
@@ -98,6 +101,7 @@ class GroupReplyService:
         self.bot_user_id = bot_user_id
         self.bot_username = bot_username
         self.knowledge_group_ids = knowledge_group_ids
+        self.is_authorized_admin = is_authorized_admin
 
     async def handle_memory_request(
         self, message: Message, action: str, content: str | None = None
@@ -107,6 +111,10 @@ class GroupReplyService:
             return
         chat_id = message.chat.id
         user_id = message.from_user.id
+        if action in {"enable", "disable", "clear", "help"}:
+            checker = self.is_authorized_admin
+            if checker is None or not await checker(chat_id, user_id):
+                return
         repository = self.repository
         now = datetime.now(timezone.utc).isoformat()
         if action == "enable":
@@ -118,14 +126,37 @@ class GroupReplyService:
         elif action == "clear":
             deleted = repository.clear_assistant_memories(chat_id, user_id)
             await message.reply(f"已删除 {deleted} 条长期记忆。")
+        elif action == "help":
+            state = "开启" if repository.assistant_memory_enabled(chat_id, user_id) else "关闭"
+            await message.reply(
+                f"本群长期记忆当前：{state}。用法：/memory on、/memory off、/memory clear；"
+                "@我后发送“记住：内容”可保存一条。"
+            )
         elif action == "remember" and content:
             if not repository.assistant_memory_enabled(chat_id, user_id):
-                await message.reply("长期记忆当前关闭。请先发送 /memory on。")
+                # Only administrators can run /memory on, so pointing members at it
+                # would just invite command spam.
+                checker = self.is_authorized_admin
+                if checker is not None and await checker(chat_id, user_id):
+                    await message.reply("长期记忆当前关闭。请先发送 /memory on。")
             elif _is_sensitive_memory(content):
                 await message.reply("为保护安全，我不会保存密码、密钥、Token 或订阅链接。")
             else:
                 repository.remember_assistant_fact(chat_id, user_id, content, now)
                 await message.reply("记住了，仅用于本群后续与我的对话。")
+
+    def addressed_memory_action(self, message: Message) -> str | None:
+        """Identify controls before moderation or model calls can create side effects."""
+        if not _is_explicit_bot_reply_trigger(
+            message, bot_user_id=self.bot_user_id, bot_username=self.bot_username
+        ):
+            return None
+        text = _reply_prompt_text(_message_text(message), self.bot_username)
+        parts = text.split(maxsplit=1)
+        if not parts or parts[0].casefold() != "/memory":
+            return None
+        argument = parts[1].strip().casefold() if len(parts) == 2 else ""
+        return {"on": "enable", "off": "disable", "clear": "clear"}.get(argument, "help")
 
     async def keep_typing(self, message: Message) -> None:
         """Keep Telegram's transient typing indicator alive while Kimi is processing."""

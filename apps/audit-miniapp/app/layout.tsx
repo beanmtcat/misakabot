@@ -1,4 +1,5 @@
 import type { Metadata } from 'next';
+import Script from 'next/script';
 import { Geist, Geist_Mono } from 'next/font/google';
 import './globals.css';
 
@@ -25,7 +26,7 @@ export const metadata: Metadata = {
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
   return <html lang="zh-CN">
     <head>
-      <script src="https://telegram.org/js/telegram-web-app.js" />
+      <Script src="https://telegram.org/js/telegram-web-app.js" strategy="beforeInteractive" />
     </head>
     <body className={`${geistSans.variable} ${geistMono.variable} antialiased`}>{children}</body>
   </html>;

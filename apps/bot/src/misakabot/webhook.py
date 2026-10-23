@@ -8,6 +8,7 @@ from contextlib import asynccontextmanager, suppress
 from datetime import datetime, timedelta, timezone
 
 from aiogram import Bot, Dispatcher
+from aiogram.exceptions import TelegramBadRequest
 from aiogram.types import Update
 from aiogram.types.update import UpdateTypeLookupError
 from fastapi import FastAPI, Header, HTTPException, Request
@@ -26,6 +27,11 @@ from .workers import verification_expiry_worker
 
 logger = logging.getLogger(__name__)
 logger.addHandler(logging.NullHandler())
+
+
+def _is_expired_callback_query_error(error: TelegramBadRequest) -> bool:
+    detail = str(error).casefold()
+    return "query is too old" in detail or "query id is invalid" in detail
 
 class JoinVerifySubmission(BaseModel):
     session_token: str
@@ -62,7 +68,9 @@ def build_webhook_app(
         if onboarding is not None:
             # The gateway also drains durable, delayed notice deletions after a restart.
             gateway = onboarding.gateway if isinstance(onboarding.gateway, AiogramGateway) else None
-            expiry_task = asyncio.create_task(verification_expiry_worker(onboarding, gateway))
+            expiry_task = asyncio.create_task(verification_expiry_worker(
+                onboarding, gateway, allowed_group_ids=settings.allowed_group_ids
+            ))
         logger.info("webhook.registered url=%s", settings.telegram_webhook_url)
         try:
             yield
@@ -111,12 +119,31 @@ def build_webhook_app(
             raise HTTPException(status_code=503, detail="update is already processing")
         try:
             await dispatcher.feed_update(bot, update)
-        except Exception:
+        except Exception as error:
+            if (
+                update_type == "callback_query"
+                and isinstance(error, TelegramBadRequest)
+                and _is_expired_callback_query_error(error)
+            ):
+                # The state-changing part of the callback may already have completed.
+                # Retrying an expired callback can repeat that action forever, while
+                # Telegram will never accept answerCallbackQuery for the old query ID.
+                repository.complete_webhook_update(
+                    update.update_id, datetime.now(timezone.utc).isoformat()
+                )
+                logger.info(
+                    "webhook.expired_callback_acknowledged update_id=%s reason=%s",
+                    update.update_id,
+                    error,
+                )
+                return {"ok": True}
             repository.release_webhook_update(update.update_id)
-            logger.exception("webhook.update_failed update_id=%s type=%s", update.update_id, update_type)
+            logger.exception(
+                "webhook.update_failed update_id=%s type=%s", update.update_id, update_type
+            )
             # Telegram retries non-2xx webhook responses. The persisted claim is released
             # first, so the retry can run instead of silently losing the update.
-            raise HTTPException(status_code=500, detail="update handling failed")
+            raise HTTPException(status_code=500, detail="update handling failed") from error
         repository.complete_webhook_update(update.update_id, datetime.now(timezone.utc).isoformat())
         logger.info("webhook.processed update_id=%s", update.update_id)
         return {"ok": True}

@@ -49,10 +49,16 @@ async def verification_expiry_worker(
     onboarding: OnboardingService,
     gateway: AiogramGateway | None = None,
     interval_seconds: int = 30,
+    allowed_group_ids: frozenset[int] = frozenset(),
 ) -> None:
     """Keep join-request deadlines enforced even when nobody opens the verification page."""
     try:
         while True:
+            if allowed_group_ids:
+                async def retry_undelivered() -> int:
+                    return await onboarding.resume_undelivered_group_challenges(allowed_group_ids)
+
+                await _run_background_operation("challenge_delivery", retry_undelivered)
             await _run_background_operation(
                 "expiry_iteration", onboarding.expire_pending_verifications
             )

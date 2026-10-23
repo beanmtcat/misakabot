@@ -35,6 +35,8 @@ class Settings:
     kimi_model: str = ""
     verification_ttl_minutes: int = 5
     secondary_verification_ttl_minutes: int = 2
+    secondary_verification_ban_hours: int = 1
+    secondary_verification_show_username: bool = True
     join_guard_burst_per_minute: int = 10
     join_guard_burst_per_five_minutes: int = 25
     join_guard_lockdown_per_five_minutes: int = 100
@@ -45,6 +47,10 @@ class Settings:
     audit_web_app_url: str = ""
     bot_reply_enabled: bool = True
     log_level: str = "INFO"
+
+    def __post_init__(self) -> None:
+        if not 0 <= self.secondary_verification_ban_hours <= 8784:
+            raise ValueError("SECONDARY_VERIFICATION_BAN_HOURS must be 0..8784 (0 = permanent)")
 
     @classmethod
     def from_environment(cls) -> "Settings":
@@ -89,6 +95,12 @@ class Settings:
             secondary_verification_ttl_minutes=int(
                 os.environ.get("SECONDARY_VERIFICATION_TTL_MINUTES", "2")
             ),
+            secondary_verification_ban_hours=int(
+                os.environ.get("SECONDARY_VERIFICATION_BAN_HOURS", "1")
+            ),
+            secondary_verification_show_username=os.environ.get(
+                "SECONDARY_VERIFICATION_SHOW_USERNAME", "true"
+            ).lower() in {"1", "true", "yes", "on"},
             join_guard_burst_per_minute=int(os.environ.get("JOIN_GUARD_BURST_PER_MINUTE", "10")),
             join_guard_burst_per_five_minutes=int(
                 os.environ.get("JOIN_GUARD_BURST_PER_FIVE_MINUTES", "25")

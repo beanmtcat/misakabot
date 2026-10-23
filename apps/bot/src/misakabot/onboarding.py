@@ -12,6 +12,7 @@ from urllib.parse import urlencode
 
 from .domain import DirectJoinInput, JoinRequestInput, JoinVerificationOutcome, OnboardingState
 from .join_guard import JoinGuard, JoinGuardDecision, JoinGuardMode, JoinGuardPolicy
+from .join_questions import GLOSSARY_QUESTIONS
 from .repository import AuditRepository
 from .telegram_gateway import TelegramGateway
 
@@ -23,87 +24,6 @@ logger.addHandler(logging.NullHandler())
 class PendingJoin:
     state: OnboardingState
     callback_data: str | None
-
-
-@dataclass(frozen=True)
-class VpsSafetyQuestion:
-    prompt: str
-    options: tuple[str, ...]
-    correct_option: str
-
-
-VPS_SAFETY_QUESTIONS: tuple[VpsSafetyQuestion, ...] = (
-    VpsSafetyQuestion(
-        "购买二手 VPS 时，卖家催你“现在转账，不然就卖给别人”。更稳妥的做法是？",
-        (
-            "先核验卖家和资产归属，再决定是否交易",
-            "立刻转账，避免错过名额",
-            "只要卖家发过截图就直接付款",
-            "把验证码交给卖家处理",
-        ),
-        "先核验卖家和资产归属，再决定是否交易",
-    ),
-    VpsSafetyQuestion(
-        "交易 VPS 或账号时，哪项最能降低“付款后失联”风险？",
-        (
-            "使用可核验的可信中介，并保留完整交易记录",
-            "只在私聊里口头约定",
-            "先把全款转给对方再说",
-            "让对方提供一张余额截图",
-        ),
-        "使用可核验的可信中介，并保留完整交易记录",
-    ),
-    VpsSafetyQuestion(
-        "卖家只有一张旧截图，且拒绝可信中介或担保流程。更稳妥的做法是？",
-        (
-            "暂不交易，等对方接受可信中介或担保流程",
-            "截图看起来真实就直接付款",
-            "把自己的账号密码发给卖家比对",
-            "安装卖家发来的远程控制软件",
-        ),
-        "暂不交易，等对方接受可信中介或担保流程",
-    ),
-    VpsSafetyQuestion(
-        "完成 VPS/账号交付后，第一时间应该做什么？",
-        (
-            "修改密码、绑定自己的二次验证并检查恢复方式",
-            "继续沿用卖家给的全部登录方式",
-            "把自己的验证码发给卖家备案",
-            "关闭所有安全提醒以免打扰",
-        ),
-        "修改密码、绑定自己的二次验证并检查恢复方式",
-    ),
-    VpsSafetyQuestion(
-        "对方指定一个你从未核验过的“中介”，并催你直接付款。应该？",
-        (
-            "停止操作，独立核验中介身份和担保规则",
-            "按对方指定的中介流程立刻付款",
-            "把支付验证码交给对方指定的中介",
-            "邀请更多陌生人共同转账",
-        ),
-        "停止操作，独立核验中介身份和担保规则",
-    ),
-    VpsSafetyQuestion(
-        "卖家声称机器“马上到期，低价秒出”，但不给出任何可验证资料。应该？",
-        (
-            "不因时间压力付款，先完成必要核验",
-            "先付款锁定，再慢慢核验",
-            "只要价格足够低就不必核验",
-            "把银行卡和验证码发给对方",
-        ),
-        "不因时间压力付款，先完成必要核验",
-    ),
-    VpsSafetyQuestion(
-        "VLESS Reality 为什么不宜直接拿 Cloudflare CDN 域名作 target？",
-        (
-            "会被滥用作 CF 端口转发，偷跑流量",
-            "会自动获得该域名的 Cloudflare 账户权限",
-            "会让自己的订阅链接立刻失效",
-            "会把正常用户的代理流量全部改为经 Cloudflare 中转",
-        ),
-        "会被滥用作 CF 端口转发，偷跑流量",
-    ),
-)
 
 
 class OnboardingService:
@@ -120,9 +40,12 @@ class OnboardingService:
     INITIAL_VERIFICATION_TIMEOUT_TEXT = "⌛ 入群申请已超时\n\n该用户未在规定时间内完成安全验证，申请已自动拒绝。"
     INITIAL_VERIFICATION_FAILURE_TEXT = "❌ 入群申请验证失败\n\n该用户未通过安全验证，申请已自动拒绝。"
     STALE_INITIAL_VERIFICATION_TEXT = "此验证会话已失效，请在 Telegram 私聊中点击最新的“开始安全验证”按钮。"
+    # Retry window for second-stage prompts Telegram never accepted (bot lost
+    # permissions, member already left, ...). Afterwards the normal timeout applies.
+    UNDELIVERED_CHALLENGE_GRACE_MINUTES = 30
     MANUAL_JOIN_WELCOME_TEXT = (
         "✅ 管理员已批准入群申请\n\n"
-        "欢迎加入群组。请完成下方 VPS 交易安全二次验证；完成前暂不能发言。"
+        "欢迎加入群组。请完成下方行业黑话二次验证；完成前暂不能发言。"
     )
 
     @staticmethod
@@ -155,6 +78,19 @@ class OnboardingService:
         )
 
     @staticmethod
+    def _is_absent_member_lookup_error(error: Exception) -> bool:
+        """Telegram cannot return membership for a requester who never joined.
+
+        A timed-out join request commonly produces ``member not found`` from
+        getChatMember. That means "not already admitted", so the request should
+        proceed to the normal decline path instead of being retried forever.
+        """
+        detail = str(error).casefold()
+        return any(marker in detail for marker in (
+            "member not found", "user not found", "user is deactivated",
+        ))
+
+    @staticmethod
     def _is_already_group_member_error(error: Exception) -> bool:
         """Telegram reports this when an administrator won the approval race."""
         detail = str(error).casefold()
@@ -170,15 +106,36 @@ class OnboardingService:
         welcome_channel_url_by_group: Mapping[int, str] | None = None,
         join_guard_policy: JoinGuardPolicy | None = None,
         admin_user_ids: frozenset[int] = frozenset(),
+        secondary_verification_ban_hours: int = 1,
     ) -> None:
         self.repository = repository
         self.gateway = gateway
         self.verification_ttl_minutes = verification_ttl_minutes
         self.secondary_verification_ttl_minutes = secondary_verification_ttl_minutes
+        self.secondary_verification_ban_hours = secondary_verification_ban_hours
         self.join_verify_url = join_verify_url.rstrip("/") + "/" if join_verify_url else ""
         self.welcome_channel_url_by_group = dict(welcome_channel_url_by_group or {})
         self.join_guard = JoinGuard(repository, join_guard_policy or JoinGuardPolicy())
         self.admin_user_ids = admin_user_ids
+
+    @property
+    def verification_ban_summary(self) -> str:
+        if self.secondary_verification_ban_hours == 0:
+            return "永久封禁。"
+        return f"封禁 {self.secondary_verification_ban_hours} 小时，到期后可重新申请入群。"
+
+    @property
+    def group_challenge_failure_text(self) -> str:
+        return f"{self.GROUP_CHALLENGE_FAILURE_TEXT}\n{self.verification_ban_summary}"
+
+    async def _ban_failed_verification(self, chat_id: int, user_id: int) -> None:
+        await self.gateway.ban_member(
+            chat_id, user_id, duration_hours=self.secondary_verification_ban_hours
+        )
+        logger.info(
+            "onboarding.verification_failed_ban chat_id=%s user_id=%s duration_hours=%s",
+            chat_id, user_id, self.secondary_verification_ban_hours,
+        )
 
     async def start(self, request: JoinRequestInput) -> PendingJoin:
         guard = self.join_guard.evaluate(request)
@@ -368,6 +325,7 @@ class OnboardingService:
             username=joined.username,
             verification_flow="direct_join",
             started_at=joined.joined_at,
+            display_name=joined.display_name,
         )
 
     async def resume_pending_direct_join_challenges(self, allowed_group_ids: frozenset[int]) -> int:
@@ -396,22 +354,29 @@ class OnboardingService:
             logger.info("onboarding.group_challenge_resumed count=%s", resumed)
         return resumed
 
+    def _undelivered_challenge_deadline(self, now: datetime) -> str:
+        """Challenges still undelivered this long after their deadline stop retrying."""
+        return (now - timedelta(minutes=self.UNDELIVERED_CHALLENGE_GRACE_MINUTES)).isoformat()
+
     async def resume_undelivered_group_challenges(self, allowed_group_ids: frozenset[int]) -> int:
         """Retry active second-stage checks that have no Telegram prompt message."""
         resumed = 0
         now = datetime.now(timezone.utc)
+        retry_before = (now - timedelta(minutes=2)).isoformat()
         for chat_id, user_id, username, verification_flow in self.repository.undelivered_group_challenges(
-            now.isoformat()
+            retry_before, self._undelivered_challenge_deadline(now)
         ):
             if chat_id not in allowed_group_ids:
                 continue
             try:
-                await self._start_group_challenge(
+                outcome = await self._start_group_challenge(
                     chat_id=chat_id,
                     user_id=user_id,
                     username=username,
                     verification_flow=verification_flow,
                     started_at=now,
+                    only_if_undelivered=True,
+                    retry_before=retry_before,
                 )
             except Exception:
                 logger.exception(
@@ -420,7 +385,8 @@ class OnboardingService:
                     user_id,
                 )
                 continue
-            resumed += 1
+            if outcome.callback_data is not None:
+                resumed += 1
         if resumed:
             logger.info("onboarding.undelivered_group_challenges_resumed count=%s", resumed)
         return resumed
@@ -433,14 +399,13 @@ class OnboardingService:
         username: str | None,
         verification_flow: str,
         started_at: datetime,
+        only_if_undelivered: bool = False,
+        retry_before: str | None = None,
+        display_name: str | None = None,
     ) -> PendingJoin:
-        question = secrets.choice(VPS_SAFETY_QUESTIONS)
-        options = list(question.options)
-        random.SystemRandom().shuffle(options)
-        answer_index = options.index(question.correct_option)
-        token = secrets.token_urlsafe(12)
+        prompt, options, answer_index, token = self._new_group_question()
         expires_at = started_at + timedelta(minutes=self.secondary_verification_ttl_minutes)
-        self.repository.create_group_challenge(
+        created = self.repository.create_group_challenge(
             chat_id=chat_id,
             user_id=user_id,
             username=username,
@@ -449,17 +414,29 @@ class OnboardingService:
             expires_at=expires_at.isoformat(),
             now=started_at.isoformat(),
             verification_flow=verification_flow,
+            only_if_undelivered=only_if_undelivered,
+            retry_before=retry_before,
         )
-        choices = tuple(
-            (option, f"{self.GROUP_CHALLENGE_PREFIX}{token}:{index}")
-            for index, option in enumerate(options)
-        )
+        if not created:
+            state = self.repository.onboarding_state(chat_id, user_id) or OnboardingState.DECLINED
+            return PendingJoin(state, None)
+        choices = self._group_choices(options, token)
         await self.gateway.restrict_member(chat_id, user_id, minutes=60 * 24 * 365)
+        if display_name is None and not username:
+            # Join requests already recorded the applicant's name; avoid an extra API call.
+            display_name = self.repository.latest_join_request_display_name(chat_id, user_id)
         message_id = await self.gateway.send_group_vps_challenge(
-            chat_id, user_id, username, question.prompt, choices, self.secondary_verification_ttl_minutes
+            chat_id, user_id, username, prompt, choices,
+            self.secondary_verification_ttl_minutes, display_name=display_name,
         )
+        delivered_at = datetime.now(timezone.utc)
         self.repository.set_group_challenge_message_id(
-            chat_id, user_id, message_id, datetime.now(timezone.utc).isoformat()
+            chat_id,
+            user_id,
+            message_id,
+            delivered_at.isoformat(),
+            (delivered_at + timedelta(minutes=self.secondary_verification_ttl_minutes)).isoformat(),
+            token_hash=self._token_hash(token),
         )
         logger.info(
             "onboarding.group_challenge_sent chat_id=%s user_id=%s flow=%s ttl_minutes=%s",
@@ -484,7 +461,7 @@ class OnboardingService:
             elif verification_flow == "direct_join":
                 # Legacy callbacks cannot complete the post-join challenge.
                 return JoinVerificationOutcome(
-                    False, OnboardingState.SECONDARY_VERIFICATION_PENDING, "请完成群内 VPS 安全验证"
+                    False, OnboardingState.SECONDARY_VERIFICATION_PENDING, "请完成群内行业黑话验证"
                 )
             else:
                 raise ValueError(f"unknown verification flow: {verification_flow}")
@@ -527,7 +504,7 @@ class OnboardingService:
         return JoinVerificationOutcome(
             True,
             OnboardingState.SECONDARY_VERIFICATION_PENDING,
-            "第一阶段验证通过。请在群内完成 VPS 交易安全验证。",
+            "第一阶段验证通过。请在群内完成行业黑话验证。",
         )
 
     def has_current_initial_verification(self, token: str, telegram_user_id: int) -> bool:
@@ -586,8 +563,32 @@ class OnboardingService:
             # A welcome notice must never stop the actual second-stage protection.
             logger.exception("onboarding.manual_join_welcome_failed chat_id=%s user_id=%s", chat_id, user_id)
 
+    @staticmethod
+    def _new_group_question() -> tuple[str, list[str], int, str]:
+        """Pick a random question with shuffled options and a fresh one-time token."""
+        question = secrets.choice(GLOSSARY_QUESTIONS)
+        options = list(question.options)
+        random.SystemRandom().shuffle(options)
+        return (
+            question.prompt,
+            options,
+            options.index(question.correct_option),
+            secrets.token_urlsafe(12),
+        )
+
+    def _group_choices(self, options: list[str], token: str) -> tuple[tuple[str, str], ...]:
+        return tuple(
+            (option, f"{self.GROUP_CHALLENGE_PREFIX}{token}:{index}")
+            for index, option in enumerate(options)
+        )
+
     async def verify_group_challenge(
-        self, callback_data: str, telegram_user_id: int
+        self,
+        callback_data: str,
+        telegram_user_id: int,
+        *,
+        username: str | None = None,
+        display_name: str | None = None,
     ) -> JoinVerificationOutcome:
         try:
             prefix, token, index_text = callback_data.split(":", maxsplit=2)
@@ -596,8 +597,16 @@ class OnboardingService:
             selected_index = int(index_text)
         except ValueError:
             return JoinVerificationOutcome(False, OnboardingState.DECLINED, "验证请求无效")
+        # A wrong answer switches to a new question, so eliminating options across
+        # attempts does not help: random guessing passes 1 - (3/4)^3 ≈ 58%, not 75%.
+        next_prompt, next_options, next_answer_index, next_token = self._new_group_question()
         result = self.repository.resolve_group_challenge(
-            self._token_hash(token), telegram_user_id, selected_index, datetime.now(timezone.utc).isoformat()
+            self._token_hash(token),
+            telegram_user_id,
+            selected_index,
+            datetime.now(timezone.utc).isoformat(),
+            next_token_hash=self._token_hash(next_token),
+            next_answer_index=next_answer_index,
         )
         if result.chat_id is None:
             return JoinVerificationOutcome(False, OnboardingState.DECLINED, "验证已过期或不属于当前账号")
@@ -628,7 +637,7 @@ class OnboardingService:
             )
         if result.terminal:
             try:
-                await self.gateway.ban_member(result.chat_id, result.user_id or telegram_user_id)
+                await self._ban_failed_verification(result.chat_id, result.user_id or telegram_user_id)
             except Exception:
                 logger.exception(
                     "onboarding.group_challenge_ban_failed chat_id=%s user_id=%s",
@@ -644,21 +653,62 @@ class OnboardingService:
             )
             await self._replace_group_challenge_message(
                 result.chat_id, result.message_id, result.user_id or telegram_user_id,
-                self.GROUP_CHALLENGE_FAILURE_TEXT,
+                self.group_challenge_failure_text,
             )
-            return JoinVerificationOutcome(False, OnboardingState.DECLINED, "三次回答错误，已移出群组")
+            return JoinVerificationOutcome(
+                False, OnboardingState.DECLINED, f"三次回答错误，已{self.verification_ban_summary}"
+            )
+        if result.message_id is not None:
+            try:
+                await self.gateway.update_group_vps_challenge(
+                    result.chat_id,
+                    result.message_id,
+                    result.user_id or telegram_user_id,
+                    username,
+                    next_prompt,
+                    self._group_choices(next_options, next_token),
+                    self.secondary_verification_ttl_minutes,
+                    result.attempts_left,
+                    display_name=display_name,
+                    expires_at=result.expires_at,
+                )
+                if result.expires_at is None:
+                    raise RuntimeError("rotated challenge is missing its deadline")
+                _ = self.repository.set_group_challenge_message_id(
+                    result.chat_id, result.user_id or telegram_user_id, result.message_id,
+                    datetime.now(timezone.utc).isoformat(), result.expires_at,
+                    token_hash=self._token_hash(next_token),
+                )
+            except Exception:
+                # The member did not receive a usable new question. Recover through
+                # the durable delivery queue; don't expire them on the old answer timer.
+                recovered = self.repository.retry_failed_group_challenge_edit(
+                    result.chat_id, result.user_id or telegram_user_id,
+                    self._token_hash(next_token), result.message_id,
+                    datetime.now(timezone.utc).isoformat(),
+                )
+                logger.exception(
+                    "onboarding.group_challenge_rotate_failed chat_id=%s user_id=%s",
+                    result.chat_id,
+                    result.user_id,
+                )
+                if recovered:
+                    return JoinVerificationOutcome(
+                        False, OnboardingState.SECONDARY_VERIFICATION_PENDING,
+                        "题目更新失败，正在重新发送，请稍候。剩余答题次数保留。",
+                    )
         return JoinVerificationOutcome(
             False,
             OnboardingState.SECONDARY_VERIFICATION_PENDING,
-            f"回答错误，还可尝试 {result.attempts_left} 次。",
+            f"回答错误，已换一道新题，还可尝试 {result.attempts_left} 次。",
         )
 
     async def resolve_group_challenge_by_admin(
-        self, token: str, approved: bool
+        self, token: str, approved: bool, *, chat_id: int | None = None
     ) -> JoinVerificationOutcome:
         """A group administrator may settle an active second-stage verification."""
         result = self.repository.resolve_group_challenge_by_admin(
-            self._token_hash(token), datetime.now(timezone.utc).isoformat(), approved
+            self._token_hash(token), datetime.now(timezone.utc).isoformat(), approved, chat_id
         )
         if result.chat_id is None or result.user_id is None:
             return JoinVerificationOutcome(False, OnboardingState.DECLINED, "验证已过期或已处理")
@@ -668,9 +718,9 @@ class OnboardingService:
                 text = self.GROUP_CHALLENGE_WELCOME_TEXT
                 reason = "管理员已通过验证并解除禁言。"
             else:
-                await self.gateway.ban_member(result.chat_id, result.user_id)
-                text = self.GROUP_CHALLENGE_FAILURE_TEXT
-                reason = "管理员已拒绝验证并移出成员。"
+                await self._ban_failed_verification(result.chat_id, result.user_id)
+                text = self.group_challenge_failure_text
+                reason = f"管理员已拒绝验证，已{self.verification_ban_summary}"
         except Exception:
             logger.exception(
                 "onboarding.group_challenge_admin_action_failed chat_id=%s user_id=%s approved=%s",
@@ -760,7 +810,9 @@ class OnboardingService:
         """Reject/ban unverified joins whose deadline passed, retrying Telegram failures later."""
         current = now or datetime.now(timezone.utc)
         timestamp = current.isoformat()
-        expired = self.repository.expired_pending_verifications(timestamp)
+        expired = self.repository.expired_pending_verifications(
+            timestamp, self._undelivered_challenge_deadline(current)
+        )
         # A join-request flood can leave thousands of expired rows. Eight workers
         # reduce recovery from roughly an hour to minutes while staying below
         # Telegram's normal Bot API request budget.
@@ -785,15 +837,24 @@ class OnboardingService:
             try:
                 already_joined = await self.gateway.is_group_member(chat_id, user_id)
             except Exception as error:
-                # Membership is unknown. Never turn a failed read into a
-                # destructive decline: leave the row pending for the next cycle.
-                logger.warning(
-                    "onboarding.expiry_member_status_lookup_deferred chat_id=%s user_id=%s reason=%s",
-                    chat_id,
-                    user_id,
-                    error,
-                )
-                return 0
+                if self._is_absent_member_lookup_error(error):
+                    already_joined = False
+                    logger.info(
+                        "onboarding.expiry_requester_not_member chat_id=%s user_id=%s",
+                        chat_id,
+                        user_id,
+                    )
+                else:
+                    # Membership is genuinely unknown. Never turn a failed read into a
+                    # destructive decline: leave the row pending for the next cycle.
+                    logger.warning(
+                        "onboarding.expiry_member_status_lookup_deferred "
+                        "chat_id=%s user_id=%s reason=%s",
+                        chat_id,
+                        user_id,
+                        error,
+                    )
+                    return 0
             if already_joined:
                 # The new-member event can be delayed or missed during a deployment.
                 # Do not reject an already approved member; convert them to the second
@@ -817,7 +878,9 @@ class OnboardingService:
                 return 0
         # Claim the row before calling Telegram. This prevents a delayed timeout worker
         # from removing a member an administrator has just approved.
-        if not self.repository.claim_expired_verification(chat_id, user_id, state, timestamp):
+        if not self.repository.claim_expired_verification(
+            chat_id, user_id, state, timestamp, self._undelivered_challenge_deadline(current)
+        ):
             logger.info(
                 "onboarding.expiry_skipped_already_resolved chat_id=%s user_id=%s flow=%s",
                 chat_id,
@@ -830,7 +893,7 @@ class OnboardingService:
                 await self.gateway.decline_join_request(chat_id, user_id)
             else:
                 # The member is already in the group during the post-join challenge.
-                await self.gateway.ban_member(chat_id, user_id)
+                await self._ban_failed_verification(chat_id, user_id)
         except Exception as error:
             if self._is_terminal_expiry_error(error):
                 finalized = self._finalize_expired_record(
@@ -841,7 +904,7 @@ class OnboardingService:
                         chat_id,
                         message_id,
                         user_id,
-                        self.GROUP_CHALLENGE_FAILURE_TEXT,
+                        self.group_challenge_failure_text,
                         delete_after_seconds=60,
                     )
                 logger.info(
@@ -869,7 +932,7 @@ class OnboardingService:
                     chat_id,
                     message_id,
                     user_id,
-                    self.GROUP_CHALLENGE_FAILURE_TEXT,
+                    self.group_challenge_failure_text,
                     delete_after_seconds=60,
                 )
             logger.info(

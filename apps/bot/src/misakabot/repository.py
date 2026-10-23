@@ -4,6 +4,7 @@ import json
 import sqlite3
 from contextlib import closing
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 from importlib import import_module
 from pathlib import Path
 from typing import Any
@@ -35,6 +36,7 @@ class GroupChallengeResolution:
     accepted: bool
     terminal: bool
     attempts_left: int
+    expires_at: str | None = None
 
 
 @dataclass(frozen=True)
@@ -717,6 +719,17 @@ class AuditRepository:
             )
             connection.commit()
 
+    def latest_join_request_display_name(self, chat_id: int, user_id: int) -> str | None:
+        row = self.query_one(
+            """
+            SELECT display_name FROM join_request_events
+            WHERE chat_id=%s AND user_id=%s AND display_name IS NOT NULL
+            ORDER BY requested_at DESC LIMIT 1
+            """,
+            (chat_id, user_id),
+        )
+        return str(row["display_name"]) if row else None
+
     def recent_join_request_names(self, chat_id: int, since: str, until: str) -> list[str]:
         with closing(self._connect()) as connection:
             rows = connection.execute(
@@ -904,13 +917,16 @@ class AuditRepository:
         return [(int(row[0]), int(row[1]), row[2]) for row in rows]
 
     def undelivered_group_challenges(
-        self, now: str
+        self, retry_before: str, delivery_deadline: str
     ) -> list[tuple[int, int, str | None, str]]:
-        """Return active second-stage challenges whose prompt was never sent.
+        """Return second-stage challenges whose delivery attempt was abandoned.
 
         A Telegram API rejection can happen after the state is persisted but before
         a group message ID is stored. Startup retries these records with a fresh,
         bounded challenge instead of leaving the member restricted without a prompt.
+        The cutoff prevents recovery from racing an in-flight Telegram send. Rows
+        whose original deadline is at or before ``delivery_deadline`` are left to the
+        expiry worker instead of being retried forever.
         """
         with closing(self._connect()) as connection:
             rows = connection.execute(
@@ -918,9 +934,13 @@ class AuditRepository:
                 SELECT chat_id, user_id, username, verification_flow
                 FROM member_onboarding
                 WHERE state=%s AND verification_message_id IS NULL
-                  AND verification_expires_at > %s
+                  AND updated_at <= %s AND verification_expires_at > %s
                 """,
-                (OnboardingState.SECONDARY_VERIFICATION_PENDING.value, now),
+                (
+                    OnboardingState.SECONDARY_VERIFICATION_PENDING.value,
+                    retry_before,
+                    delivery_deadline,
+                ),
             ).fetchall()
         return [(int(row[0]), int(row[1]), row[2], str(row[3])) for row in rows]
 
@@ -935,8 +955,28 @@ class AuditRepository:
         expires_at: str,
         now: str,
         verification_flow: str,
-    ) -> None:
+        only_if_undelivered: bool = False,
+        retry_before: str | None = None,
+    ) -> bool:
         """Persist a one-time post-join challenge; correct option is never exposed in callback data."""
+        if only_if_undelivered:
+            with closing(self._connect()) as connection:
+                cursor = connection.execute(
+                    """UPDATE member_onboarding
+                    SET verification_token_hash=%s,
+                        verification_answer_index=%s, updated_at=%s
+                    WHERE chat_id=%s AND user_id=%s AND state=%s
+                      AND verification_message_id IS NULL AND updated_at <= %s""",
+                    # The original deadline is kept so repeated delivery failures
+                    # eventually expire; delivery itself starts the answer timer.
+                    (
+                        token_hash, answer_index, now, chat_id, user_id,
+                        OnboardingState.SECONDARY_VERIFICATION_PENDING.value,
+                        retry_before,
+                    ),
+                )
+                connection.commit()
+            return cursor.rowcount == 1
         with closing(self._connect()) as connection:
             connection.execute(
                 """
@@ -969,25 +1009,38 @@ class AuditRepository:
                 ),
             )
             connection.commit()
+        return True
 
-    def set_group_challenge_message_id(self, chat_id: int, user_id: int, message_id: int, now: str) -> None:
-        """Store the group message so its challenge can later be replaced with a final status."""
+    def set_group_challenge_message_id(
+        self, chat_id: int, user_id: int, message_id: int, now: str, expires_at: str,
+        token_hash: str | None = None,
+    ) -> bool:
+        """Store the delivered message and start the answer timer from delivery time."""
         with closing(self._connect()) as connection:
-            connection.execute(
+            cursor = connection.execute(
                 """
                 UPDATE member_onboarding
-                SET verification_message_id=%s, updated_at=%s
+                SET verification_message_id=%s, verification_expires_at=%s, updated_at=%s
                 WHERE chat_id=%s AND user_id=%s AND state=%s
+                  AND verification_token_hash=COALESCE(%s, verification_token_hash)
                 """,
                 (
                     message_id,
+                    expires_at,
                     now,
                     chat_id,
                     user_id,
                     OnboardingState.SECONDARY_VERIFICATION_PENDING.value,
+                    token_hash,
                 ),
             )
+            if cursor.rowcount == 1:
+                connection.execute(
+                    "DELETE FROM scheduled_message_deletions WHERE chat_id=%s AND message_id=%s",
+                    (chat_id, message_id),
+                )
             connection.commit()
+        return cursor.rowcount == 1
 
     def resolve_group_challenge(
         self,
@@ -996,17 +1049,25 @@ class AuditRepository:
         selected_index: int,
         now: str,
         max_attempts: int = 3,
+        next_token_hash: str | None = None,
+        next_answer_index: int | None = None,
     ) -> GroupChallengeResolution:
-        """Atomically resolve a bound multiple-choice challenge and count wrong answers."""
+        """Atomically resolve a bound multiple-choice challenge and count wrong answers.
+
+        When ``next_token_hash`` is given, a non-final wrong answer rotates the challenge
+        to that new question in the same transaction, so the old buttons stop working
+        before anyone can retry them.
+        """
         with closing(self._connect()) as connection:
             connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(
                 """
                 SELECT chat_id, user_id, verification_answer_index, verification_attempts,
-                       verification_message_id
+                       verification_message_id, verification_expires_at
                 FROM member_onboarding
                 WHERE verification_token_hash=%s AND user_id=%s AND state=%s
                   AND verification_expires_at > %s
+                  AND verification_message_id IS NOT NULL
                 """,
                 (
                     token_hash,
@@ -1043,6 +1104,24 @@ class AuditRepository:
                     """,
                     (OnboardingState.DECLINED.value, used_attempts, now, chat_id, user_id),
                 )
+            elif next_token_hash is not None:
+                # Protect the old card if a crash interrupts its edit/registration.
+                connection.execute(
+                    """INSERT INTO scheduled_message_deletions(chat_id, message_id, due_at)
+                    VALUES (%s, %s, %s) ON CONFLICT(chat_id, message_id)
+                    DO UPDATE SET due_at=excluded.due_at""",
+                    (chat_id, message_id,
+                     (datetime.fromisoformat(now) + timedelta(minutes=30)).isoformat()),
+                )
+                connection.execute(
+                    """
+                    UPDATE member_onboarding
+                    SET verification_attempts=%s, verification_token_hash=%s,
+                        verification_answer_index=%s, verification_message_id=NULL, updated_at=%s
+                    WHERE chat_id=%s AND user_id=%s
+                    """,
+                    (used_attempts, next_token_hash, next_answer_index, now, chat_id, user_id),
+                )
             else:
                 connection.execute(
                     """
@@ -1053,11 +1132,43 @@ class AuditRepository:
                 )
             connection.commit()
         return GroupChallengeResolution(
-            chat_id, user_id, message_id, False, terminal, max_attempts - used_attempts
+            chat_id, user_id, message_id, False, terminal, max_attempts - used_attempts,
+            str(row[5]),
         )
 
+    def retry_failed_group_challenge_edit(
+        self, chat_id: int, user_id: int, token_hash: str, message_id: int, now: str
+    ) -> bool:
+        """Retire an undeliverable rotation without resetting attempts or banning its user.
+
+        The old card cleanup and the recovery state are one transaction. A stale
+        failure must never overwrite an administrator's completed decision.
+        """
+        due_at = (datetime.fromisoformat(now) + timedelta(seconds=60)).isoformat()
+        with closing(self._connect()) as connection:
+            cursor = connection.execute(
+                """UPDATE member_onboarding
+                SET verification_message_id=NULL, verification_token_hash=NULL, updated_at=%s
+                WHERE chat_id=%s AND user_id=%s AND state=%s
+                  AND verification_token_hash=%s
+                  AND (verification_message_id IS NULL OR verification_message_id=%s)""",
+                (now, chat_id, user_id, OnboardingState.SECONDARY_VERIFICATION_PENDING.value,
+                 token_hash, message_id),
+            )
+            if cursor.rowcount != 1:
+                connection.rollback()
+                return False
+            connection.execute(
+                """INSERT INTO scheduled_message_deletions(chat_id, message_id, due_at)
+                VALUES (%s, %s, %s) ON CONFLICT(chat_id, message_id)
+                DO UPDATE SET due_at=excluded.due_at""",
+                (chat_id, message_id, due_at),
+            )
+            connection.commit()
+        return True
+
     def resolve_group_challenge_by_admin(
-        self, token_hash: str, now: str, approved: bool
+        self, token_hash: str, now: str, approved: bool, chat_id: int | None = None
     ) -> GroupChallengeResolution:
         """Let a group administrator settle one active post-join challenge."""
         with closing(self._connect()) as connection:
@@ -1067,8 +1178,9 @@ class AuditRepository:
                 SELECT chat_id, user_id, verification_attempts, verification_message_id
                 FROM member_onboarding
                 WHERE verification_token_hash=%s AND state=%s AND verification_expires_at > %s
+                  AND chat_id=COALESCE(%s, chat_id)
                 """,
-                (token_hash, OnboardingState.SECONDARY_VERIFICATION_PENDING.value, now),
+                (token_hash, OnboardingState.SECONDARY_VERIFICATION_PENDING.value, now, chat_id),
             ).fetchone()
             if row is None:
                 connection.rollback()
@@ -1249,8 +1361,14 @@ class AuditRepository:
             connection.commit()
         return cursor.rowcount == 1
 
-    def expired_pending_verifications(self, now: str) -> list[tuple[int, int, str, OnboardingState, int | None]]:
-        """List unverified members whose deadline passed; callers perform Telegram actions."""
+    def expired_pending_verifications(
+        self, now: str, delivery_deadline: str = ""
+    ) -> list[tuple[int, int, str, OnboardingState, int | None]]:
+        """List unverified members whose deadline passed; callers perform Telegram actions.
+
+        Undelivered second-stage challenges are included only once their deadline is at
+        or before ``delivery_deadline`` (the default excludes them).
+        """
         with closing(self._connect()) as connection:
             rows = connection.execute(
                 """
@@ -1258,11 +1376,15 @@ class AuditRepository:
                 FROM member_onboarding
                 WHERE state IN (%s, %s) AND verification_expires_at IS NOT NULL
                   AND verification_expires_at <= %s
+                  AND (state<>%s OR verification_message_id IS NOT NULL
+                       OR verification_expires_at <= %s)
                 """,
                 (
                     OnboardingState.VERIFICATION_PENDING.value,
                     OnboardingState.SECONDARY_VERIFICATION_PENDING.value,
                     now,
+                    OnboardingState.SECONDARY_VERIFICATION_PENDING.value,
+                    delivery_deadline,
                 ),
             ).fetchall()
         return [
@@ -1277,7 +1399,12 @@ class AuditRepository:
         ]
 
     def claim_expired_verification(
-        self, chat_id: int, user_id: int, state: OnboardingState, now: str
+        self,
+        chat_id: int,
+        user_id: int,
+        state: OnboardingState,
+        now: str,
+        delivery_deadline: str = "",
     ) -> bool:
         """Atomically reserve an expired verification before a Telegram-side action.
 
@@ -1293,6 +1420,8 @@ class AuditRepository:
                 SET state=%s, updated_at=%s
                 WHERE chat_id=%s AND user_id=%s AND state=%s
                   AND verification_expires_at IS NOT NULL AND verification_expires_at <= %s
+                  AND (state<>%s OR verification_message_id IS NOT NULL
+                       OR verification_expires_at <= %s)
                 """,
                 (
                     OnboardingState.DECLINED.value,
@@ -1301,6 +1430,8 @@ class AuditRepository:
                     user_id,
                     state.value,
                     now,
+                    OnboardingState.SECONDARY_VERIFICATION_PENDING.value,
+                    delivery_deadline,
                 ),
             )
             connection.commit()

@@ -11,6 +11,10 @@ RUN rm -rf .vinext && npm run build
 FROM node:22-bookworm-slim
 
 WORKDIR /app
+# workerd uses the operating system trust store when initializing outbound TLS.
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
 COPY --from=build /app /app
 EXPOSE 8083
 # The Sites/Vinext build emits a Cloudflare Worker plus its static assets.

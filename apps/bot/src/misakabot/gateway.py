@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import html
 import logging
 import re
+import unicodedata
 from datetime import datetime, timedelta, timezone
 from time import monotonic
 
@@ -21,6 +23,19 @@ from .repository import AuditRepository
 
 logger = logging.getLogger(__name__)
 logger.addHandler(logging.NullHandler())
+
+_DISPLAY_NAME_LIMIT = 20
+_LINK_LIKE_PATTERN = re.compile(
+    r"(?i)(?:https?://|www\.|t\.me/|telegram\.(?:me|dog)/)\S*"
+    r"|\b[\w-]+(?:\.[\w-]+)*\.(?:com|net|org|me|io|cc|top|xyz|vip|cn|co|app|link|site)\b\S*"
+)
+
+
+def sanitize_display_name(name: str) -> str:
+    """Strip control characters, links and mentions so a name only identifies a member."""
+    visible = "".join(char for char in name if not unicodedata.category(char).startswith("C"))
+    visible = _LINK_LIKE_PATTERN.sub(" ", visible).replace("@", " ")
+    return " ".join(visible.split())[:_DISPLAY_NAME_LIMIT]
 
 
 def is_active_chat_member(member: ChatMemberUnion) -> bool:
@@ -43,9 +58,16 @@ class AiogramGateway:
     _ABANDONED_WEBHOOK_LEASE_RETENTION_DAYS = 1
     _MEMBER_LOOKUP_RETRY_DELAYS_SECONDS: tuple[float, ...] = (0.25, 0.75, 1.5)
 
-    def __init__(self, bot: Bot, repository: AuditRepository) -> None:
+    def __init__(
+        self,
+        bot: Bot,
+        repository: AuditRepository,
+        *,
+        show_secondary_verification_username: bool = True,
+    ) -> None:
         self.bot = bot
         self.repository = repository
+        self.show_secondary_verification_username = show_secondary_verification_username
         self._background_tasks: set[asyncio.Task[None]] = set()
         self._admin_cache: dict[tuple[int, int], tuple[bool, float]] = {}
 
@@ -63,8 +85,14 @@ class AiogramGateway:
             until_date=datetime.now(timezone.utc) + timedelta(minutes=minutes),
         )
 
-    async def ban_member(self, chat_id: int, user_id: int) -> None:
-        await self.bot.ban_chat_member(chat_id, user_id)
+    async def ban_member(self, chat_id: int, user_id: int, *, duration_hours: int = 0) -> None:
+        if not 0 <= duration_hours <= 8784:
+            raise ValueError("duration_hours must be 0..8784 (0 = permanent)")
+        if duration_hours:
+            until_date = datetime.now(timezone.utc) + timedelta(hours=duration_hours)
+            _ = await self.bot.ban_chat_member(chat_id, user_id, until_date=until_date)
+        else:
+            _ = await self.bot.ban_chat_member(chat_id, user_id)
 
     async def unban_member(self, chat_id: int, user_id: int) -> None:
         await self.bot.unban_chat_member(chat_id, user_id, only_if_banned=True)
@@ -383,6 +411,68 @@ class AiogramGateway:
         # Do not include the member's name: it can itself contain advertising content.
         await self.bot.send_message(chat_id, OnboardingService.MANUAL_JOIN_WELCOME_TEXT)
 
+    async def _group_challenge_member_label(
+        self, chat_id: int, user_id: int, username: str | None, display_name: str | None
+    ) -> str:
+        # Identity is wrapped in <code> so usernames and names that look like links or
+        # mentions are never clickable: the Bot must not advertise for spam accounts.
+        if not self.show_secondary_verification_username:
+            return f"<code>{user_id}</code>"
+        if username:
+            return f"<code>@{html.escape(username)}</code>（ID：{user_id}）"
+        if display_name is None:
+            try:
+                # One short attempt only: this runs during join floods.
+                member = await self.bot.get_chat_member(chat_id, user_id, request_timeout=3)
+                display_name = member.user.full_name
+            except Exception:
+                # Identity decoration must never prevent the actual challenge.
+                logger.info(
+                    "onboarding.challenge_name_unavailable chat_id=%s user_id=%s",
+                    chat_id, user_id,
+                )
+        safe_name = sanitize_display_name(display_name or "")
+        if safe_name:
+            return f"<code>{html.escape(safe_name)}</code>（ID：{user_id}）"
+        return f"<code>{user_id}</code>"
+
+    def _group_challenge_keyboard(
+        self, user_id: int, username: str | None, choices: tuple[tuple[str, str], ...]
+    ) -> InlineKeyboardMarkup:
+        token = choices[0][1].split(":", 2)[1]
+        return InlineKeyboardMarkup(
+            inline_keyboard=[
+                [InlineKeyboardButton(text=text, callback_data=callback_data)]
+                for text, callback_data in choices
+            ] + [
+                [
+                    InlineKeyboardButton(
+                        text="✅ 管理员：通过", callback_data=f"vps_admin_approve:{token}",
+                    ),
+                    InlineKeyboardButton(
+                        text="❌ 管理员：拒绝", callback_data=f"vps_admin_reject:{token}",
+                    ),
+                ],
+                *self._member_info_keyboard(user_id, username).inline_keyboard,
+            ]
+        )
+
+    @staticmethod
+    def _group_challenge_text(
+        member_label: str, prompt: str, ttl_minutes: int, expires_at: str | None = None
+    ) -> str:
+        deadline = (
+            "截止时间："
+            + datetime.fromisoformat(expires_at).astimezone(timezone(timedelta(hours=8))).strftime("%m-%d %H:%M:%S")
+            + "（UTC+8，答错不重置）。"
+            if expires_at else f"{ttl_minutes} 分钟内未完成将移出群组。"
+        )
+        return (
+            f"新成员 {member_label} 请完成行业黑话二次验证：\n"
+            f"{html.escape(prompt)}\n\n"
+            f"请选择正确答案。仅该成员可作答；三次答错将移出群组。{deadline}"
+        )
+
     async def send_group_vps_challenge(
         self,
         chat_id: int,
@@ -391,34 +481,60 @@ class AiogramGateway:
         prompt: str,
         choices: tuple[tuple[str, str], ...],
         ttl_minutes: int,
+        *,
+        display_name: str | None = None,
     ) -> int:
+        member_label = await self._group_challenge_member_label(
+            chat_id, user_id, username, display_name
+        )
         message = await self.bot.send_message(
             chat_id,
-            (
-                f"新成员 {user_id} 请完成 VPS 交易安全二次验证：\n"
-                f"{prompt}\n\n"
-                f"请选择正确答案。仅该成员可作答；{ttl_minutes} 分钟内未完成或三次答错将移出群组。"
-            ),
-            reply_markup=InlineKeyboardMarkup(
-                inline_keyboard=[
-                    [InlineKeyboardButton(text=text, callback_data=callback_data)]
-                    for text, callback_data in choices
-                ] + [
-                    [
-                        InlineKeyboardButton(
-                            text="✅ 管理员：通过",
-                            callback_data=f"vps_admin_approve:{choices[0][1].split(':', 2)[1]}",
-                        ),
-                        InlineKeyboardButton(
-                            text="❌ 管理员：拒绝",
-                            callback_data=f"vps_admin_reject:{choices[0][1].split(':', 2)[1]}",
-                        ),
-                    ],
-                    *self._member_info_keyboard(user_id, username).inline_keyboard,
-                ]
-            ),
+            self._group_challenge_text(member_label, prompt, ttl_minutes),
+            parse_mode="HTML",
+            reply_markup=self._group_challenge_keyboard(user_id, username, choices),
+        )
+        # If the process dies before onboarding stores this ID, the card must not
+        # remain forever. No in-process timer: this durable orphan guard is cancelled
+        # atomically by set_group_challenge_message_id on successful registration.
+        self.repository.schedule_message_deletion(
+            chat_id, message.message_id,
+            (datetime.now(timezone.utc) + timedelta(minutes=ttl_minutes + 30)).isoformat(),
         )
         return message.message_id
+
+    async def update_group_vps_challenge(
+        self,
+        chat_id: int,
+        message_id: int,
+        user_id: int,
+        username: str | None,
+        prompt: str,
+        choices: tuple[tuple[str, str], ...],
+        ttl_minutes: int,
+        attempts_left: int,
+        *,
+        display_name: str | None = None,
+        expires_at: str | None = None,
+    ) -> None:
+        """Replace the prompt after a wrong answer; the old buttons are already invalid."""
+        member_label = await self._group_challenge_member_label(
+            chat_id, user_id, username, display_name
+        )
+        try:
+            _ = await self.bot.edit_message_text(
+                chat_id=chat_id,
+                message_id=message_id,
+                text=(
+                    f"回答错误，已换一道新题，还可尝试 {attempts_left} 次。\n\n"
+                    + self._group_challenge_text(member_label, prompt, ttl_minutes, expires_at)
+                ),
+                parse_mode="HTML",
+                reply_markup=self._group_challenge_keyboard(user_id, username, choices),
+                request_timeout=30,
+            )
+        except TelegramBadRequest as error:
+            if "message is not modified" not in str(error).casefold():
+                raise
 
     async def replace_group_verification_message(
         self,

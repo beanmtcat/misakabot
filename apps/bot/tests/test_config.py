@@ -63,6 +63,35 @@ class SettingsTests(unittest.TestCase):
             settings = Settings.from_environment()
         self.assertEqual(settings.verification_ttl_minutes, 5)
         self.assertEqual(settings.secondary_verification_ttl_minutes, 2)
+        self.assertEqual(settings.secondary_verification_ban_hours, 1)
+        self.assertTrue(settings.secondary_verification_show_username)
+
+    def test_secondary_verification_ban_duration_configuration(self) -> None:
+        for hours in (0, 3, 8784):
+            with self.subTest(hours=hours), patch.dict(os.environ, {
+                "TELEGRAM_BOT_TOKEN": "123:token",
+                "SECONDARY_VERIFICATION_BAN_HOURS": str(hours),
+            }, clear=True):
+                self.assertEqual(Settings.from_environment().secondary_verification_ban_hours, hours)
+        for value in ("-1", "8785", "invalid"):
+            with self.subTest(value=value), patch.dict(os.environ, {
+                "TELEGRAM_BOT_TOKEN": "123:token",
+                "SECONDARY_VERIFICATION_BAN_HOURS": value,
+            }, clear=True):
+                with self.assertRaises(ValueError):
+                    Settings.from_environment()
+
+    def test_secondary_verification_username_can_be_hidden(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "TELEGRAM_BOT_TOKEN": "123:token",
+                "SECONDARY_VERIFICATION_SHOW_USERNAME": "false",
+            },
+            clear=True,
+        ):
+            settings = Settings.from_environment()
+        self.assertFalse(settings.secondary_verification_show_username)
 
     def test_join_guard_defaults_keep_defense_until_two_quiet_hours(self) -> None:
         with patch.dict(os.environ, {"TELEGRAM_BOT_TOKEN": "123:token"}, clear=True):

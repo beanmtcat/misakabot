@@ -8,7 +8,7 @@ class TelegramGateway(Protocol):
 
     async def restrict_member(self, chat_id: int, user_id: int, minutes: int) -> None: ...
 
-    async def ban_member(self, chat_id: int, user_id: int) -> None: ...
+    async def ban_member(self, chat_id: int, user_id: int, *, duration_hours: int = 0) -> None: ...
 
     async def unban_member(self, chat_id: int, user_id: int) -> None: ...
 
@@ -65,7 +65,24 @@ class TelegramGateway(Protocol):
         prompt: str,
         choices: tuple[tuple[str, str], ...],
         ttl_minutes: int,
+        *,
+        display_name: str | None = None,
     ) -> int: ...
+
+    async def update_group_vps_challenge(
+        self,
+        chat_id: int,
+        message_id: int,
+        user_id: int,
+        username: str | None,
+        prompt: str,
+        choices: tuple[tuple[str, str], ...],
+        ttl_minutes: int,
+        attempts_left: int,
+        *,
+        display_name: str | None = None,
+        expires_at: str | None = None,
+    ) -> None: ...
 
     async def replace_group_verification_message(
         self,

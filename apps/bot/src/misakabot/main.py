@@ -87,7 +87,11 @@ async def run_bot(settings: Settings) -> None:
     repository.initialize()
     bot = Bot(settings.telegram_bot_token)
     bot_identity = await bot.get_me()
-    gateway = AiogramGateway(bot, repository)
+    gateway = AiogramGateway(
+        bot,
+        repository,
+        show_secondary_verification_username=settings.secondary_verification_show_username,
+    )
     service = ModerationService(
         repository=repository,
         gateway=gateway,
@@ -113,6 +117,7 @@ async def run_bot(settings: Settings) -> None:
             repeat_cooldown_hours=settings.join_guard_repeat_cooldown_hours,
         ),
         settings.admin_user_ids,
+        secondary_verification_ban_hours=settings.secondary_verification_ban_hours,
     )
     await onboarding.resume_pending_direct_join_challenges(settings.allowed_group_ids)
     await onboarding.resume_undelivered_group_challenges(settings.allowed_group_ids)
@@ -147,7 +152,9 @@ async def run_bot(settings: Settings) -> None:
         await server.serve()
         return
     await register_bot_commands(bot, settings.allowed_group_ids)
-    expiry_task = asyncio.create_task(verification_expiry_worker(onboarding, gateway))
+    expiry_task = asyncio.create_task(verification_expiry_worker(
+        onboarding, gateway, allowed_group_ids=settings.allowed_group_ids
+    ))
     try:
         await dispatcher.start_polling(bot)
     finally:

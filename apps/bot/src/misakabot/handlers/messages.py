@@ -9,6 +9,7 @@ from ..domain import Action, MessageInput
 from ..group_reply import GroupReplyService
 from ..onboarding import OnboardingService
 from ..service import ModerationService
+from .commands import is_management_command
 
 logger = logging.getLogger(__name__)
 logger.addHandler(logging.NullHandler())
@@ -120,6 +121,22 @@ def build_message_router(
                     )
 
         if outcome is None or outcome.action in {Action.ALLOW, Action.RELEASE}:
+            if not is_group_admin and (
+                is_management_command(message, replies.bot_username)
+                or replies.addressed_memory_action(message) is not None
+            ):
+                # Admin-only commands from members get no reply; removing them keeps
+                # menu taps and probing from cluttering the group.
+                try:
+                    await service.gateway.delete_message(message.chat.id, message.message_id)
+                except Exception as error:
+                    logger.info(
+                        "message.non_admin_command_delete_failed chat_id=%s message_id=%s reason=%s",
+                        message.chat.id,
+                        message.message_id,
+                        error,
+                    )
+                return
             await replies.handle(message)
 
     return router

@@ -4,6 +4,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from aiogram.exceptions import TelegramBadRequest
+from aiogram.methods import AnswerCallbackQuery
 from fastapi.testclient import TestClient
 
 from misakabot.config import Settings
@@ -50,6 +52,15 @@ class FailingDispatcher(FakeDispatcher):
         raise RuntimeError("simulated handler failure")
 
 
+class ExpiredCallbackDispatcher(FakeDispatcher):
+    async def feed_update(self, _: FakeBot, update: object) -> None:
+        self.updates.append(update.update_id)  # type: ignore[attr-defined]
+        raise TelegramBadRequest(
+            AnswerCallbackQuery(callback_query_id="expired"),
+            "query is too old and response timeout expired or query ID is invalid",
+        )
+
+
 class WebhookTests(unittest.TestCase):
     def setUp(self) -> None:
         self.tempdir = tempfile.TemporaryDirectory()
@@ -80,8 +91,21 @@ class WebhookTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         self.assertEqual(self.dispatcher.updates, [99])
         self.assertEqual(self.bot.webhooks[0]["url"], self.settings.telegram_webhook_url)
-        self.assertEqual(len(self.bot.command_menus), 3)
-        self.assertEqual(len(self.bot.deleted_command_scopes), 2)
+        self.assertEqual(len(self.bot.command_menus), 2)
+        deleted = {
+            (item["scope"].type, item.get("language_code", ""))
+            for item in self.bot.deleted_command_scopes
+        }
+        for language in ("", "zh", "en"):
+            self.assertIn(("default", language), deleted)
+            self.assertIn(("all_group_chats", language), deleted)
+            self.assertIn(("chat", language), deleted)
+        menu = self.bot.command_menus[1]
+        self.assertEqual(menu["scope"].type, "chat_administrators")
+        self.assertEqual(
+            [command.command for command in menu["commands"]],
+            ["audit", "unban", "join_guard", "memory"],
+        )
 
     def test_rejects_an_invalid_secret(self) -> None:
         app = build_webhook_app(self.settings, self.bot, self.dispatcher, self.repository)  # type: ignore[arg-type]
@@ -101,6 +125,28 @@ class WebhookTests(unittest.TestCase):
             )
         self.assertEqual(response.status_code, 500)
         self.assertEqual(dispatcher.updates, [101])
+
+    def test_expired_callback_is_acknowledged_without_webhook_retry(self) -> None:
+        dispatcher = ExpiredCallbackDispatcher()
+        app = build_webhook_app(
+            self.settings, self.bot, dispatcher, self.repository  # type: ignore[arg-type]
+        )
+        callback_update = {
+            "update_id": 103,
+            "callback_query": {
+                "id": "expired",
+                "from": {"id": 1, "is_bot": False, "first_name": "Admin"},
+                "chat_instance": "instance",
+                "data": "vps_verify:old:0",
+            },
+        }
+        headers = {"X-Telegram-Bot-Api-Secret-Token": "expected-secret"}
+        with TestClient(app) as client:
+            first = client.post("/telegram/webhook", headers=headers, json=callback_update)
+            second = client.post("/telegram/webhook", headers=headers, json=callback_update)
+        self.assertEqual(first.status_code, 200)
+        self.assertEqual(second.status_code, 200)
+        self.assertEqual(dispatcher.updates, [103])
 
     def test_processed_update_is_not_dispatched_twice(self) -> None:
         app = build_webhook_app(self.settings, self.bot, self.dispatcher, self.repository)  # type: ignore[arg-type]

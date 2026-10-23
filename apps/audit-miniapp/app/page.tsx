@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo, useRef, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState, useSyncExternalStore } from 'react';
 import {
   Activity,
   ArrowDownUp,
@@ -48,6 +48,15 @@ const tabApiFilters: Record<string, string | undefined> = {
   '已恢复': 'restored',
 };
 
+async function errorDetail(response: Response, fallback: string): Promise<string> {
+  // Error bodies are untrusted JSON (or not JSON at all behind a proxy).
+  const body: unknown = await response.json().catch(() => null);
+  if (body && typeof body === 'object' && 'detail' in body && typeof body.detail === 'string' && body.detail) {
+    return body.detail;
+  }
+  return fallback;
+}
+
 function mapEvent(event: ApiEvent): AuditEvent {
   const confidence = typeof event.verdict?.confidence === 'number' ? event.verdict.confidence : null;
   const isAdvertisement = typeof event.verdict?.is_ad === 'boolean' ? event.verdict.is_ad : null;
@@ -93,72 +102,84 @@ const statusStyle: Record<Status, string> = {
   已恢复: 'bg-emerald-500/12 text-emerald-700 ring-emerald-500/20', 已放行: 'bg-emerald-500/12 text-emerald-700 ring-emerald-500/20', 历史隔离: 'bg-sky-500/12 text-sky-700 ring-sky-500/20',
 };
 
+function subscribeToPageReady(onChange: () => void) {
+  window.addEventListener('load', onChange);
+  window.addEventListener('pageshow', onChange);
+  return () => {
+    window.removeEventListener('load', onChange);
+    window.removeEventListener('pageshow', onChange);
+  };
+}
+
+function pageSnapshot() {
+  const telegram = (window as Window & { Telegram?: { WebApp?: { initData?: string } } }).Telegram;
+  const parameters = new URLSearchParams(window.location.search);
+  return JSON.stringify({
+    initData: telegram?.WebApp?.initData || '',
+    chatId: parameters.get('chat_id') || '',
+    title: parameters.get('chat_title')?.trim() || '',
+  });
+}
+
 export default function Home() {
+  const snapshot = useSyncExternalStore(subscribeToPageReady, pageSnapshot, () => '');
+  const page = useMemo(() => snapshot ? JSON.parse(snapshot) as { initData: string; chatId: string; title: string } : null, [snapshot]);
+  const context = useMemo(() => page?.initData && page.chatId ? { initData: page.initData, chatId: page.chatId } : null, [page]);
+  useEffect(() => {
+    const telegram = (window as Window & { Telegram?: { WebApp?: { ready: () => void; expand: () => void } } }).Telegram;
+    telegram?.WebApp?.ready(); telegram?.WebApp?.expand();
+  }, [context]);
+  if (!page) return <main className="p-6"><output>正在加载审计页面…</output></main>;
+  if (!context) return <main className="p-6"><output>{!page.initData ? '请从 Bot 的审计按钮打开此页面。' : '审计链接缺少群组信息，请在群内重新使用 /audit。'}</output></main>;
+  return <AuditDashboard key={`${context.chatId}:${context.initData}`} pageContext={context} groupTitle={page.title || `群组 ${context.chatId}`} />;
+}
+
+async function fetchAuditPage(
+  context: PageContext, beforeId?: number, filter?: string,
+): Promise<AuditPage> {
+  const parameters = new URLSearchParams({ limit: String(pageSize), chat_id: context.chatId });
+  if (beforeId) parameters.set('before_id', String(beforeId));
+  if (filter) parameters.set('filter', filter);
+  const response = await fetch(`${apiBase}/v1/audit/events?${parameters}`, {
+    headers: { 'X-Telegram-Init-Data': context.initData },
+  });
+  if (!response.ok) throw new Error(await errorDetail(response, '无权读取审计日志'));
+  const payload = await response.json() as AuditPage | ApiEvent[];
+  // Allow a rolling deployment: the previous API returned a bare array.
+  // It remains readable, but does not advertise a next cursor page.
+  if (Array.isArray(payload)) return { items: payload, next_before_id: null };
+  if (!Array.isArray(payload.items)) throw new Error('审计服务返回了无效数据');
+  return payload;
+}
+
+async function fetchAuditSummary(context: PageContext): Promise<AuditSummary> {
+  const parameters = new URLSearchParams({ chat_id: context.chatId });
+  const response = await fetch(`${apiBase}/v1/audit/summary?${parameters}`, {
+    headers: { 'X-Telegram-Init-Data': context.initData },
+  });
+  if (!response.ok) throw new Error(await errorDetail(response, '无法读取审计汇总'));
+  return response.json() as Promise<AuditSummary>;
+}
+
+
+function AuditDashboard({ pageContext, groupTitle }: { pageContext: PageContext; groupTitle: string }) {
   const [events, setEvents] = useState<AuditEvent[]>([]);
   const [tab, setTab] = useState('全部');
   const [query, setQuery] = useState('');
   const [selectedId, setSelectedId] = useState('');
   const [mobileDetailOpen, setMobileDetailOpen] = useState(false);
   const [notice, setNotice] = useState('');
-  const [groupTitle, setGroupTitle] = useState('');
-  const [pageContext, setPageContext] = useState<PageContext | null>(null);
   const [summary, setSummary] = useState<AuditSummary | null>(null);
   const [nextBeforeId, setNextBeforeId] = useState<number | null>(null);
   const [hasMore, setHasMore] = useState(false);
   const [isLoadingMore, setIsLoadingMore] = useState(false);
   const loadMoreRef = useRef<HTMLDivElement>(null);
-
-  async function fetchAuditPage(
-    context: PageContext, beforeId?: number, filter?: string,
-  ): Promise<AuditPage> {
-    const parameters = new URLSearchParams({ limit: String(pageSize), chat_id: context.chatId });
-    if (beforeId) parameters.set('before_id', String(beforeId));
-    if (filter) parameters.set('filter', filter);
-    const response = await fetch(`${apiBase}/v1/audit/events?${parameters}`, {
-      headers: { 'X-Telegram-Init-Data': context.initData },
-    });
-    if (!response.ok) throw new Error((await response.json()).detail || '无权读取审计日志');
-    const payload = await response.json() as AuditPage | ApiEvent[];
-    // Allow a rolling deployment: the previous API returned a bare array.
-    // It remains readable, but does not advertise a next cursor page.
-    if (Array.isArray(payload)) return { items: payload, next_before_id: null };
-    if (!Array.isArray(payload.items)) throw new Error('审计服务返回了无效数据');
-    return payload;
-  }
-
-  async function fetchAuditSummary(context: PageContext): Promise<AuditSummary> {
-    const parameters = new URLSearchParams({ chat_id: context.chatId });
-    const response = await fetch(`${apiBase}/v1/audit/summary?${parameters}`, {
-      headers: { 'X-Telegram-Init-Data': context.initData },
-    });
-    if (!response.ok) throw new Error((await response.json()).detail || '无法读取审计汇总');
-    return response.json() as Promise<AuditSummary>;
-  }
-
-  useEffect(() => {
-    const telegram = (window as Window & { Telegram?: { WebApp?: { ready: () => void; expand: () => void; initData?: string } } }).Telegram;
-    telegram?.WebApp?.ready(); telegram?.WebApp?.expand();
-    const initData = telegram?.WebApp?.initData;
-    const chatId = new URLSearchParams(window.location.search).get('chat_id');
-    const chatTitle = new URLSearchParams(window.location.search).get('chat_title');
-    if (!initData) {
-      setNotice('请从 Bot 的审计按钮打开此页面。');
-      return;
-    }
-    if (!chatId) {
-      setNotice('审计链接缺少群组信息，请在群内重新使用 /audit。');
-      return;
-    }
-    const context = { initData, chatId };
-    setGroupTitle(chatTitle?.trim() || `群组 ${chatId}`);
-    setPageContext(context);
-  }, []);
+  const requestGeneration = useRef(0);
+  const loadingMore = useRef(false);
 
   useEffect(() => {
     if (!pageContext) return;
     let cancelled = false;
-    setHasMore(false);
-    setNextBeforeId(null);
     fetchAuditPage(pageContext, undefined, tabApiFilters[tab])
       .then((page) => {
         if (cancelled) return;
@@ -181,19 +202,41 @@ export default function Home() {
     return () => { cancelled = true; };
   }, [pageContext]);
 
-  async function loadMore() {
-    if (!pageContext || !hasMore || !nextBeforeId || isLoadingMore) return;
+  const loadMore = useCallback(async () => {
+    if (!hasMore || !nextBeforeId || loadingMore.current) return;
+    loadingMore.current = true;
+    const generation = requestGeneration.current;
     setIsLoadingMore(true);
     try {
       const page = await fetchAuditPage(pageContext, nextBeforeId, tabApiFilters[tab]);
-      setEvents((current) => [...current, ...page.items.map(mapEvent)]);
+      if (generation !== requestGeneration.current) return;
+      setEvents((current) => {
+        const known = new Set(current.map((event) => event.id));
+        return [...current, ...page.items.map(mapEvent).filter((event) => !known.has(event.id))];
+      });
       setNextBeforeId(page.next_before_id);
       setHasMore(page.next_before_id !== null);
     } catch (error) {
-      setNotice(error instanceof Error ? error.message : '加载更多审计记录失败。');
+      if (generation === requestGeneration.current) setNotice(error instanceof Error ? error.message : '加载更多审计记录失败。');
     } finally {
-      setIsLoadingMore(false);
+      if (generation === requestGeneration.current) {
+        loadingMore.current = false;
+        setIsLoadingMore(false);
+      }
     }
+  }, [hasMore, nextBeforeId, pageContext, tab]);
+
+  function selectTab(label: string) {
+    if (label === tab) return;
+    requestGeneration.current += 1;
+    loadingMore.current = false;
+    setIsLoadingMore(false);
+    setHasMore(false);
+    setNextBeforeId(null);
+    setEvents([]);
+    setSelectedId('');
+    setMobileDetailOpen(false);
+    setTab(label);
   }
 
   useEffect(() => {
@@ -205,14 +248,14 @@ export default function Home() {
     );
     observer.observe(target);
     return () => observer.disconnect();
-  }, [hasMore, isLoadingMore, nextBeforeId, pageContext, tab]);
+  }, [hasMore, isLoadingMore, nextBeforeId, pageContext, loadMore]);
 
   const activeTab = tabs.find((item) => item.label === tab);
   const visible = useMemo(() => events.filter((item) => {
     const matchedStatus = !activeTab?.statuses || activeTab.statuses.includes(item.status);
     const searchable = `${item.user} ${item.username} ${item.category} ${item.message}`.toLowerCase();
     return matchedStatus && (!query.trim() || searchable.includes(query.trim().toLowerCase()));
-  }), [events, activeTab?.statuses, query]);
+  }), [events, activeTab, query]);
   const selected = events.find((item) => item.id === selectedId) ?? visible[0];
   function selectEvent(eventId: string) {
     setSelectedId(eventId);
@@ -233,7 +276,7 @@ export default function Home() {
         headers: { 'Content-Type': 'application/json', 'X-Telegram-Init-Data': initData },
         body: JSON.stringify({ note: '由审计 Mini App 操作' }),
       });
-      if (!response.ok) throw new Error((await response.json()).detail || '操作失败');
+      if (!response.ok) throw new Error(await errorDetail(response, '操作失败'));
       setEvents((current) => current.map((item) => item.id === selected.id ? { ...item, status, action } : item));
       if (pageContext) fetchAuditSummary(pageContext).then(setSummary).catch(() => undefined);
       setNotice(status === '已恢复' ? '已标记为误封。' : '已确认封禁并写入审计记录。');
@@ -250,22 +293,32 @@ export default function Home() {
       </header>
       <section className="mb-5 overflow-hidden rounded-[1.4rem] bg-[#172f43] px-5 py-5 text-white shadow-xl shadow-[#17334c]/10 sm:px-7"><div className="flex flex-col gap-5 sm:flex-row sm:items-end sm:justify-between"><div><div className="mb-2 flex items-center gap-2 text-sm text-[#add4d5]"><MessageSquareText className="size-4" /><span className="truncate">{groupTitle || '当前群组审计范围'}</span></div><p className="text-2xl font-bold tracking-tight">审计记录总计 {summary?.total ?? '—'} 条</p><p className="mt-1 text-sm text-[#b5cbd5]">当前筛选已加载 {events.length} 条 · 审计记录仅对已授权的群管理员开放</p></div><div className="flex gap-5 text-sm"><div><p className="text-2xl font-bold text-[#b7f4e6]">{summary?.permanent_bans ?? '—'}</p><p className="text-[#b5cbd5]">永久封禁</p></div><div><p className="text-2xl font-bold text-white">{summary ? summary.pending_review + summary.quarantined : '—'}</p><p className="text-[#b5cbd5]">等待处置</p></div></div></div></section>
       <div className="grid gap-5 lg:grid-cols-[minmax(0,1fr)_320px]">
-        <section className="min-w-0 rounded-[1.35rem] border border-[#dce6e9] bg-white shadow-sm"><div className="border-b border-[#e4ebed] px-4 pt-4 sm:px-5 sm:pt-5"><div className="flex items-center justify-between gap-3"><div><h2 className="font-bold">审计事件</h2><p className="mt-0.5 text-xs text-[#6d8491]">可查看原始内容、判定依据与处置结果</p></div><Button variant="outline" size="sm" className="border-[#d6e0e4] text-[#355464]"><ArrowDownUp />最新优先</Button></div><div className="mt-4 flex gap-1 overflow-x-auto pb-0.5">{tabs.map((item) => <button key={item.label} onClick={() => setTab(item.label)} className={`shrink-0 border-b-2 px-3 py-2 text-sm font-semibold transition ${tab === item.label ? 'border-[#1a9689] text-[#08776e]' : 'border-transparent text-[#6a828f] hover:text-[#294858]'}`}>{item.label}</button>)}</div></div>
+        <section className="min-w-0 rounded-[1.35rem] border border-[#dce6e9] bg-white shadow-sm"><div className="border-b border-[#e4ebed] px-4 pt-4 sm:px-5 sm:pt-5"><div className="flex items-center justify-between gap-3"><div><h2 className="font-bold">审计事件</h2><p className="mt-0.5 text-xs text-[#6d8491]">可查看原始内容、判定依据与处置结果</p></div><Button variant="outline" size="sm" className="border-[#d6e0e4] text-[#355464]"><ArrowDownUp />最新优先</Button></div><div className="mt-4 flex gap-1 overflow-x-auto pb-0.5">{tabs.map((item) => <button key={item.label} onClick={() => selectTab(item.label)} className={`shrink-0 border-b-2 px-3 py-2 text-sm font-semibold transition ${tab === item.label ? 'border-[#1a9689] text-[#08776e]' : 'border-transparent text-[#6a828f] hover:text-[#294858]'}`}>{item.label}</button>)}</div></div>
           <div className="flex items-center gap-2 border-b border-[#e4ebed] px-4 py-3 sm:px-5"><div className="flex min-w-0 flex-1 items-center gap-2 rounded-xl bg-[#f2f6f8] px-3 py-2 text-[#6c8390]"><Search className="size-4 shrink-0" /><input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="搜索用户、内容或类型" className="min-w-0 flex-1 bg-transparent text-sm text-[#1c3542] outline-none placeholder:text-[#8ba0aa]" /></div><Button variant="outline" size="icon" className="shrink-0 border-[#d6e0e4] text-[#456070]" aria-label="筛选"><Filter /></Button></div>
           <div className="divide-y divide-[#e8eef0]">{visible.map((item) => <button key={item.id} onClick={() => selectEvent(item.id)} className={`flex w-full items-start gap-3 px-4 py-4 text-left transition hover:bg-[#f7fbfb] sm:px-5 ${selected?.id === item.id ? 'bg-[#ecf9f6]' : ''}`}><div className={`mt-0.5 grid size-9 shrink-0 place-items-center rounded-xl ${item.risk === '高风险' ? 'bg-rose-500/10 text-rose-600' : 'bg-amber-400/15 text-amber-700'}`}>{item.risk === '高风险' ? <ShieldAlert className="size-4" /> : <Flag className="size-4" />}</div><div className="min-w-0 flex-1"><div className="flex items-center justify-between gap-3"><p className="truncate text-sm font-bold">{item.user}</p><time className="shrink-0 text-xs text-[#78909b]">{item.time}</time></div><p className="mt-0.5 truncate text-xs text-[#69818e]">{item.category} · {item.username}</p><p className="mt-2 line-clamp-2 text-sm leading-5 text-[#385361]">{item.message}</p><div className="mt-2 flex items-center gap-2"><span className={`rounded-full px-2 py-0.5 text-[11px] font-bold ring-1 ring-inset ${statusStyle[item.status]}`}>{item.status}</span><span className={item.isAdvertisement === true ? 'text-xs font-semibold text-rose-600' : item.confidence !== null ? 'text-xs font-semibold text-emerald-700' : 'text-xs font-semibold text-sky-700'}>{item.confidence !== null ? `${item.isAdvertisement ? '广告' : '正常'} ${Math.round(item.confidence * 100)}%` : `规则 ${item.ruleScore} 分`}</span></div></div><ChevronRight className="mt-2 size-4 shrink-0 text-[#9db0b8]" /></button>)}{visible.length === 0 && <div className="grid place-items-center gap-2 px-5 py-14 text-center text-[#718993]"><FileSearch className="size-7" /><p className="text-sm">没有符合条件的审计事件</p></div>}{hasMore && <div ref={loadMoreRef} className="px-5 py-5 text-center text-xs font-medium text-[#6b8490]">{isLoadingMore ? '正在加载更多记录…' : '继续下滑以加载更多记录'}</div>}</div>
         </section>
         <aside className="hidden rounded-[1.35rem] border border-[#dce6e9] bg-white p-5 shadow-sm lg:sticky lg:top-5 lg:block lg:h-fit">{selected && <EventDetail event={selected} onAction={updateSelected} />}</aside>
       </div>
     </div>
-    {mobileDetailOpen && selected && <div className="fixed inset-0 z-40 bg-[#102530]/45 p-3 backdrop-blur-[2px] lg:hidden" role="dialog" aria-modal="true" aria-label="审计事件详情">
+    {mobileDetailOpen && selected && <DetailDialog onClose={() => setMobileDetailOpen(false)}>
       <div className="absolute inset-x-0 bottom-0 max-h-[88dvh] overflow-y-auto rounded-t-[1.7rem] bg-white p-5 shadow-2xl">
         <div className="mx-auto mb-4 h-1.5 w-11 rounded-full bg-[#d4e0e4]" />
         <button onClick={() => setMobileDetailOpen(false)} className="absolute right-4 top-4 grid size-9 place-items-center rounded-full bg-[#eef4f5] text-[#456070]" aria-label="关闭详情"><X className="size-5" /></button>
         <EventDetail event={selected} onAction={updateSelected} />
       </div>
-    </div>}
-    {notice && <div role="status" className="fixed inset-x-4 bottom-5 z-50 mx-auto w-fit rounded-full bg-[#173e4c] px-4 py-2.5 text-sm font-medium text-white shadow-xl">{notice}</div>}
+    </DetailDialog>}
+    {notice && <output className="fixed inset-x-4 bottom-5 z-50 mx-auto w-fit rounded-full bg-[#173e4c] px-4 py-2.5 text-sm font-medium text-white shadow-xl">{notice}</output>}
   </main>;
+}
+
+function DetailDialog({ children, onClose }: { children: React.ReactNode; onClose: () => void }) {
+  const ref = useRef<HTMLDialogElement>(null);
+  useEffect(() => {
+    const dialog = ref.current;
+    dialog?.showModal();
+    return () => dialog?.close();
+  }, []);
+  return <dialog ref={ref} onCancel={onClose} aria-label="审计事件详情" className="fixed inset-0 m-0 h-dvh max-h-none w-screen max-w-none border-0 bg-transparent p-3 text-[#152936] backdrop:bg-[#102530]/45 backdrop:backdrop-blur-[2px]">{children}</dialog>;
 }
 
 function EventDetail({ event, onAction }: { event: AuditEvent; onAction: (status: Status, action: string) => void }) {

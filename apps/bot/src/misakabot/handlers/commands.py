@@ -5,6 +5,7 @@ from datetime import datetime, timedelta, timezone
 from urllib.parse import urlencode
 
 from aiogram import F, Router
+from aiogram.dispatcher.event.bases import SkipHandler
 from aiogram.exceptions import TelegramForbiddenError
 from aiogram.filters import Command
 from aiogram.types import CallbackQuery, Message
@@ -20,6 +21,18 @@ logger.addHandler(logging.NullHandler())
 
 
 SINGAPORE_TIMEZONE = timezone(timedelta(hours=8), name="Asia/Singapore")
+MANAGEMENT_COMMANDS = frozenset({"audit", "unban", "join_guard", "memory"})
+
+
+def is_management_command(message: Message, bot_username: str | None) -> bool:
+    """Recognize this Bot's admin-only commands, including ``/cmd@ThisBot``."""
+    parts = (message.text or message.caption or "").split(maxsplit=1)
+    if not parts or not parts[0].startswith("/"):
+        return False
+    command, _, mention = parts[0][1:].partition("@")
+    if mention and (not bot_username or mention.casefold() != bot_username.casefold()):
+        return False
+    return command.casefold() in MANAGEMENT_COMMANDS
 
 
 def format_join_guard_expiry(defense_until: datetime | None) -> str:
@@ -45,7 +58,8 @@ def build_command_router(
     @router.message(Command("start"))
     async def start_private_chat(message: Message) -> None:
         if message.chat.type != "private":
-            return
+            # Group messages must still reach moderation.
+            raise SkipHandler()
         await message.answer("本 Bot 不提供私聊对话，请在已启用群组中 @我或回复我的消息。")
 
     @router.message(Command("unban"))
@@ -63,7 +77,8 @@ def build_command_router(
                 message.chat.id,
                 message.from_user.id,
             )
-            return
+            # Non-admin commands are moderated like any message, then removed silently.
+            raise SkipHandler()
         parts = (message.text or "").split(maxsplit=1)
         if len(parts) == 2:
             try:
@@ -92,7 +107,7 @@ def build_command_router(
                 message.chat.id,
                 message.from_user.id,
             )
-            return
+            raise SkipHandler()
         if not audit_web_app_url:
             await message.answer("审计页面尚未配置 AUDIT_WEB_APP_URL。")
             return
@@ -129,7 +144,7 @@ def build_command_router(
                 message.chat.id,
                 message.from_user.id,
             )
-            return
+            raise SkipHandler()
         argument = ((message.text or "").split(maxsplit=1)[1:] or [""])[0].strip().casefold()
         requested_mode = {
             "auto": JoinGuardMode.NORMAL,
@@ -162,17 +177,34 @@ def build_command_router(
             or message.chat.id not in allowed_group_ids
         ):
             return
-        argument = ((message.text or "").split(maxsplit=1)[1:] or [""])[0].strip().casefold()
-        action = {"on": "enable", "off": "disable", "clear": "clear"}.get(argument)
-        if action is None:
-            enabled = onboarding.repository.assistant_memory_enabled(message.chat.id, message.from_user.id)
-            state = "开启" if enabled else "关闭"
-            await message.reply(
-                f"本群长期记忆当前：{state}。用法：/memory on、/memory off、/memory clear；"
-                "@我后发送“记住：内容”可保存一条。"
+        if not await is_authorized_admin(message.chat.id, message.from_user.id):
+            logger.info(
+                "memory.command_ignored_non_admin chat_id=%s actor_user_id=%s",
+                message.chat.id,
+                message.from_user.id,
             )
-            return
+            raise SkipHandler()
+        argument = ((message.text or "").split(maxsplit=1)[1:] or [""])[0].strip().casefold()
+        action = {"on": "enable", "off": "disable", "clear": "clear"}.get(argument, "help")
         await handle_memory_request(message, action)
+
+    def is_addressed_memory_command(message: Message) -> bool:
+        return replies.addressed_memory_action(message) is not None
+
+    @router.message(is_addressed_memory_command)
+    async def addressed_memory_command(message: Message) -> None:
+        if (
+            message.from_user is None
+            or message.from_user.is_bot
+            or message.chat.type not in {"group", "supergroup"}
+            or message.chat.id not in allowed_group_ids
+        ):
+            return
+        if not await is_authorized_admin(message.chat.id, message.from_user.id):
+            raise SkipHandler()
+        action = replies.addressed_memory_action(message)
+        if action is not None:
+            await handle_memory_request(message, action)
 
     @router.callback_query(F.data.startswith("admin_unban:"))
     async def unban_member_button(callback: CallbackQuery) -> None:

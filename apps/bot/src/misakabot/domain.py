@@ -60,6 +60,7 @@ class DirectJoinInput:
     chat_id: int
     user_id: int
     username: str | None = None
+    display_name: str | None = None
     joined_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
 

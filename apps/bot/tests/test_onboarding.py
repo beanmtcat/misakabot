@@ -5,10 +5,12 @@ import tempfile
 import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from unittest.mock import AsyncMock, patch
 from urllib.parse import parse_qs, urlparse
 
 from misakabot.domain import DirectJoinInput, JoinRequestInput, OnboardingState
-from misakabot.onboarding import VPS_SAFETY_QUESTIONS, OnboardingService
+from misakabot.onboarding import OnboardingService
+from misakabot.join_questions import GLOSSARY_QUESTIONS
 from misakabot.repository import AuditRepository
 
 
@@ -19,9 +21,11 @@ class FakeGateway:
         self.verifications: list[tuple[int, str, str | None]] = []
         self.group_challenges: list[tuple[int, int, str, tuple[tuple[str, str], ...], int]] = []
         self.group_challenge_usernames: list[str | None] = []
+        self.rotated_challenges: list[tuple[int, str, int]] = []
         self.restricted: list[tuple[int, int, int]] = []
         self.released: list[tuple[int, int]] = []
         self.banned: list[tuple[int, int]] = []
+        self.ban_durations: list[int] = []
         self.replaced_group_verifications: list[tuple[int, int, str]] = []
         self.replaced_group_delete_after: list[int | None] = []
         self.replaced_group_channel_urls: list[str | None] = []
@@ -56,10 +60,30 @@ class FakeGateway:
         prompt: str,
         choices: tuple[tuple[str, str], ...],
         ttl_minutes: int,
+        *,
+        display_name: str | None = None,
     ) -> int:
         self.group_challenges.append((chat_id, user_id, prompt, choices, ttl_minutes))
         self.group_challenge_usernames.append(username)
         return 1000 + len(self.group_challenges)
+
+    async def update_group_vps_challenge(
+        self,
+        chat_id: int,
+        message_id: int,
+        user_id: int,
+        username: str | None,
+        prompt: str,
+        choices: tuple[tuple[str, str], ...],
+        ttl_minutes: int,
+        attempts_left: int,
+        *,
+        display_name: str | None = None,
+        expires_at: str | None = None,
+    ) -> None:
+        # Keep group_challenges[-1] as the question currently shown to the member.
+        self.group_challenges.append((chat_id, user_id, prompt, choices, ttl_minutes))
+        self.rotated_challenges.append((message_id, prompt, attempts_left))
 
     async def replace_group_verification_message(
         self,
@@ -95,8 +119,9 @@ class FakeGateway:
     async def release_member(self, chat_id: int, user_id: int) -> None:
         self.released.append((chat_id, user_id))
 
-    async def ban_member(self, chat_id: int, user_id: int) -> None:
+    async def ban_member(self, chat_id: int, user_id: int, *, duration_hours: int = 0) -> None:
         self.banned.append((chat_id, user_id))
+        self.ban_durations.append(duration_hours)
 
     async def get_member_info(self, chat_id: int, user_id: int) -> str:
         return f"用户 ID：{user_id}"
@@ -107,6 +132,11 @@ class FakeGateway:
 
 class DeactivatedUserGateway(FakeGateway):
     async def decline_join_request(self, chat_id: int, user_id: int) -> None:
+        raise RuntimeError("Telegram server says - Forbidden: user is deactivated")
+
+
+class DeactivatedMemberLookupGateway(DeactivatedUserGateway):
+    async def is_group_member(self, chat_id: int, user_id: int) -> bool:
         raise RuntimeError("Telegram server says - Forbidden: user is deactivated")
 
 
@@ -137,6 +167,11 @@ class MemberLookupFailingGateway(FakeGateway):
         raise RuntimeError("temporary Telegram member lookup failure")
 
 
+class MissingMemberLookupGateway(FakeGateway):
+    async def is_group_member(self, chat_id: int, user_id: int) -> bool:
+        raise RuntimeError("Telegram server says - Bad Request: member not found")
+
+
 class OnboardingServiceTests(unittest.TestCase):
     def setUp(self) -> None:
         self.tempdir = tempfile.TemporaryDirectory()
@@ -160,8 +195,34 @@ class OnboardingServiceTests(unittest.TestCase):
 
     def _correct_group_callback(self) -> str:
         _, _, prompt, choices, _ = self.gateway.group_challenges[-1]
-        correct_option = next(question.correct_option for question in VPS_SAFETY_QUESTIONS if question.prompt == prompt)
+        correct_option = next(question.correct_option for question in GLOSSARY_QUESTIONS if question.prompt == prompt)
         return next(callback_data for text, callback_data in choices if text == correct_option)
+
+    def _wrong_group_callback(self) -> str:
+        _, _, _, choices, _ = self.gateway.group_challenges[-1]
+        correct = self._correct_group_callback()
+        return next(data for _, data in choices if data != correct)
+
+    def test_wrong_answer_rotates_to_a_new_question_and_invalidates_old_buttons(self) -> None:
+        asyncio.run(self.service.start_direct_join(DirectJoinInput(chat_id=-100123, user_id=44)))
+        old_wrong = self._wrong_group_callback()
+        old_correct = self._correct_group_callback()
+
+        outcome = asyncio.run(self.service.verify_group_challenge(old_wrong, 44))
+
+        self.assertIn("已换一道新题", outcome.reason)
+        self.assertEqual(len(self.gateway.rotated_challenges), 1)
+        message_id, _, attempts_left = self.gateway.rotated_challenges[0]
+        self.assertEqual((message_id, attempts_left), (1001, 2))
+        # The previous question's buttons, including its correct answer, are dead.
+        stale = asyncio.run(self.service.verify_group_challenge(old_correct, 44))
+        self.assertFalse(stale.accepted)
+        self.assertEqual(
+            self.repository.onboarding_state(-100123, 44),
+            OnboardingState.SECONDARY_VERIFICATION_PENDING,
+        )
+        accepted = asyncio.run(self.service.verify_group_challenge(self._correct_group_callback(), 44))
+        self.assertTrue(accepted.accepted)
 
     def test_verification_auto_approves_but_first_message_remains_special(self) -> None:
         pending = asyncio.run(self.service.start(self.request))
@@ -334,6 +395,23 @@ class OnboardingServiceTests(unittest.TestCase):
         self.assertFalse(outcome.accepted)
         self.assertEqual(self.gateway.released, [])
 
+    def test_every_glossary_question_can_be_answered_after_option_shuffle(self) -> None:
+        for index, question in enumerate(GLOSSARY_QUESTIONS):
+            with self.subTest(prompt=question.prompt), patch(
+                "misakabot.onboarding.secrets.choice", return_value=question
+            ):
+                user_id = 10000 + index
+                asyncio.run(self.service.start_direct_join(DirectJoinInput(
+                    chat_id=-100123, user_id=user_id,
+                )))
+                _, _, prompt, choices, _ = self.gateway.group_challenges[-1]
+                self.assertEqual(prompt, question.prompt)
+                self.assertEqual({text for text, _ in choices}, set(question.options))
+                correct = next(data for text, data in choices if text == question.correct_option)
+                result = asyncio.run(self.service.verify_group_challenge(correct, user_id))
+                self.assertTrue(result.accepted)
+                self.assertEqual(self.gateway.released[-1], (-100123, user_id))
+
     def test_successful_dmit_welcome_includes_the_news_channel_url(self) -> None:
         self.service = OnboardingService(
             self.repository,
@@ -365,20 +443,18 @@ class OnboardingServiceTests(unittest.TestCase):
 
     def test_secondary_challenge_bans_after_three_wrong_answers(self) -> None:
         asyncio.run(self.service.start_direct_join(DirectJoinInput(chat_id=-100123, user_id=43)))
-        correct_callback = self._correct_group_callback()
-        _, _, _, choices, _ = self.gateway.group_challenges[-1]
-        wrong_callback = next(callback_data for _, callback_data in choices if callback_data != correct_callback)
-
         for _ in range(2):
-            outcome = asyncio.run(self.service.verify_group_challenge(wrong_callback, 43))
+            outcome = asyncio.run(self.service.verify_group_challenge(self._wrong_group_callback(), 43))
             self.assertFalse(outcome.accepted)
             self.assertEqual(outcome.state, OnboardingState.SECONDARY_VERIFICATION_PENDING)
-        outcome = asyncio.run(self.service.verify_group_challenge(wrong_callback, 43))
+        outcome = asyncio.run(self.service.verify_group_challenge(self._wrong_group_callback(), 43))
 
         self.assertFalse(outcome.accepted)
         self.assertEqual(outcome.state, OnboardingState.DECLINED)
         self.assertEqual(self.gateway.banned, [(-100123, 43)])
+        self.assertEqual(self.gateway.ban_durations, [1])
         self.assertIn("二次验证未通过", self.gateway.replaced_group_verifications[-1][2])
+        self.assertIn("封禁 1 小时", self.gateway.replaced_group_verifications[-1][2])
 
     def test_group_admin_can_approve_the_second_stage_verification(self) -> None:
         pending = asyncio.run(self.service.start_direct_join(DirectJoinInput(chat_id=-100123, user_id=43)))
@@ -389,6 +465,77 @@ class OnboardingServiceTests(unittest.TestCase):
         self.assertEqual(self.gateway.released, [(-100123, 43)])
         self.assertIn("欢迎加入群组", self.gateway.replaced_group_verifications[-1][2])
 
+    def test_failed_rotation_recovers_without_resetting_attempts(self) -> None:
+        asyncio.run(self.service.start_direct_join(DirectJoinInput(chat_id=-100123, user_id=43)))
+        wrong = self._wrong_group_callback()
+        original_correct = self._correct_group_callback()
+        with patch.object(self.gateway, "update_group_vps_challenge", new=AsyncMock(
+            side_effect=RuntimeError("Telegram edit failed")
+        )):
+            result = asyncio.run(self.service.verify_group_challenge(wrong, 43))
+        self.assertIn("正在重新发送", result.reason)
+        self.assertFalse(asyncio.run(self.service.verify_group_challenge(original_correct, 43)).accepted)
+        row = self.repository.query_one(
+            "SELECT verification_attempts, verification_message_id FROM member_onboarding WHERE user_id=%s", (43,)
+        )
+        self.assertEqual(row["verification_attempts"], 1)
+        self.assertIsNone(row["verification_message_id"])
+        self.assertEqual(asyncio.run(self.service.expire_pending_verifications(
+            datetime.now(timezone.utc) + timedelta(minutes=3)
+        )), 0)
+        future = datetime.now(timezone.utc) + timedelta(minutes=3)
+        with patch("misakabot.onboarding.datetime", wraps=datetime) as clock:
+            clock.now.return_value = future
+            self.assertEqual(asyncio.run(self.service.resume_undelivered_group_challenges(
+                frozenset({-100123})
+            )), 1)
+        row = self.repository.query_one(
+            "SELECT verification_attempts FROM member_onboarding WHERE user_id=%s", (43,)
+        )
+        self.assertEqual(row["verification_attempts"], 1)
+        self.assertEqual(self.repository.due_message_deletions(future.isoformat()), [(-100123, 1001)])
+        for _ in range(2):
+            result = asyncio.run(self.service.verify_group_challenge(self._wrong_group_callback(), 43))
+        self.assertEqual(result.state, OnboardingState.DECLINED)
+        self.assertEqual(self.gateway.ban_durations, [1])
+
+    def test_expiry_cannot_ban_member_during_card_edit(self) -> None:
+        asyncio.run(self.service.start_direct_join(DirectJoinInput(chat_id=-100123, user_id=43)))
+
+        async def slow_edit(*args: object, **kwargs: object) -> None:
+            self.assertEqual(await self.service.expire_pending_verifications(
+                datetime.now(timezone.utc) + timedelta(minutes=3)
+            ), 0)
+            raise RuntimeError("edit failed after waiting")
+
+        with patch.object(self.gateway, "update_group_vps_challenge", new=AsyncMock(side_effect=slow_edit)):
+            asyncio.run(self.service.verify_group_challenge(self._wrong_group_callback(), 43))
+        self.assertEqual(self.gateway.banned, [])
+
+    def test_rotation_keeps_original_deadline_and_displays_it(self) -> None:
+        asyncio.run(self.service.start_direct_join(DirectJoinInput(chat_id=-100123, user_id=43)))
+        deadline = self.repository.query_one(
+            "SELECT verification_expires_at FROM member_onboarding WHERE user_id=%s", (43,)
+        )["verification_expires_at"]
+        edit = AsyncMock()
+        with patch.object(self.gateway, "update_group_vps_challenge", new=edit):
+            asyncio.run(self.service.verify_group_challenge(self._wrong_group_callback(), 43))
+        self.assertEqual(edit.await_args.kwargs["expires_at"], deadline)
+        self.assertEqual(self.repository.query_one(
+            "SELECT verification_expires_at FROM member_onboarding WHERE user_id=%s", (43,)
+        )["verification_expires_at"], deadline)
+
+    def test_delivery_ack_cannot_overwrite_a_newer_token(self) -> None:
+        asyncio.run(self.service.start_direct_join(DirectJoinInput(chat_id=-100123, user_id=43)))
+        now = datetime.now(timezone.utc)
+        self.assertFalse(self.repository.set_group_challenge_message_id(
+            -100123, 43, 9999, now.isoformat(), (now + timedelta(minutes=2)).isoformat(),
+            token_hash="obsolete-token",
+        ))
+        self.assertEqual(self.repository.query_one(
+            "SELECT verification_message_id FROM member_onboarding WHERE user_id=%s", (43,)
+        )["verification_message_id"], 1001)
+
     def test_group_admin_can_reject_the_second_stage_verification(self) -> None:
         pending = asyncio.run(self.service.start_direct_join(DirectJoinInput(chat_id=-100123, user_id=43)))
         outcome = asyncio.run(self.service.resolve_group_challenge_by_admin(pending.callback_data or "", approved=False))
@@ -396,7 +543,53 @@ class OnboardingServiceTests(unittest.TestCase):
         self.assertFalse(outcome.accepted)
         self.assertEqual(outcome.state, OnboardingState.DECLINED)
         self.assertEqual(self.gateway.banned, [(-100123, 43)])
+        self.assertEqual(self.gateway.ban_durations, [1])
         self.assertIn("二次验证未通过", self.gateway.replaced_group_verifications[-1][2])
+
+    def test_admin_callback_cannot_resolve_a_token_from_another_group(self) -> None:
+        pending = asyncio.run(self.service.start_direct_join(DirectJoinInput(chat_id=-100123, user_id=43)))
+        for approved in (True, False):
+            result = asyncio.run(self.service.resolve_group_challenge_by_admin(
+                pending.callback_data or "", approved, chat_id=-100999
+            ))
+            self.assertFalse(result.accepted)
+        self.assertEqual(self.gateway.released, [])
+        self.assertEqual(self.gateway.banned, [])
+        self.assertTrue(asyncio.run(self.service.resolve_group_challenge_by_admin(
+            pending.callback_data or "", True, chat_id=-100123
+        )).accepted)
+
+    def test_configured_ban_duration_applies_to_all_second_stage_failures(self) -> None:
+        for hours in (0, 3):
+            for index, failure in enumerate(("timeout", "wrong_answers", "admin_reject")):
+                with self.subTest(hours=hours, failure=failure):
+                    user_id = 200 + hours * 10 + index
+                    now = datetime.now(timezone.utc)
+                    gateway = FakeGateway()
+                    service = OnboardingService(
+                        self.repository, gateway, secondary_verification_ban_hours=hours
+                    )
+                    pending = asyncio.run(service.start_direct_join(DirectJoinInput(
+                        chat_id=-100123, user_id=user_id, joined_at=now,
+                    )))
+                    if failure == "timeout":
+                        asyncio.run(service.expire_pending_verifications(now + timedelta(minutes=3)))
+                    elif failure == "admin_reject":
+                        asyncio.run(service.resolve_group_challenge_by_admin(
+                            pending.callback_data or "", approved=False
+                        ))
+                    else:
+                        for _ in range(3):
+                            _, _, prompt, choices, _ = gateway.group_challenges[-1]
+                            question = next(q for q in GLOSSARY_QUESTIONS if q.prompt == prompt)
+                            wrong = next(
+                                data for text, data in choices if text != question.correct_option
+                            )
+                            asyncio.run(service.verify_group_challenge(wrong, user_id))
+                    self.assertEqual(gateway.ban_durations, [hours])
+                    self.assertFalse(self.repository.is_user_blocked(user_id))
+                    expected = "永久封禁" if hours == 0 else "封禁 3 小时"
+                    self.assertIn(expected, gateway.replaced_group_verifications[-1][2])
 
     def test_verified_join_does_not_receive_a_duplicate_direct_join_challenge(self) -> None:
         pending = asyncio.run(self.service.start(self.request))
@@ -433,7 +626,7 @@ class OnboardingServiceTests(unittest.TestCase):
         self.assertEqual(self.repository.onboarding_state(-100123, 66), OnboardingState.SECONDARY_VERIFICATION_PENDING)
 
     def test_startup_retries_second_stage_challenge_without_a_message(self) -> None:
-        now = datetime.now(timezone.utc)
+        now = datetime.now(timezone.utc) - timedelta(minutes=3)
         self.repository.create_group_challenge(
             chat_id=-100123,
             user_id=67,
@@ -450,6 +643,77 @@ class OnboardingServiceTests(unittest.TestCase):
         self.assertEqual(resumed, 1)
         self.assertEqual(len(self.gateway.group_challenges), 1)
         self.assertEqual(self.repository.onboarding_state(-100123, 67), OnboardingState.SECONDARY_VERIFICATION_PENDING)
+
+    def test_failed_challenge_delivery_is_retried_without_banning_unprompted_user(self) -> None:
+        now = datetime.now(timezone.utc)
+        with patch.object(self.gateway, "send_group_vps_challenge", new=AsyncMock(
+            side_effect=RuntimeError("Telegram temporarily unavailable")
+        )):
+            with self.assertRaises(RuntimeError):
+                asyncio.run(self.service.start_direct_join(DirectJoinInput(
+                    chat_id=-100123, user_id=68, joined_at=now,
+                )))
+        future = now + timedelta(minutes=3)
+        self.assertEqual(asyncio.run(self.service.expire_pending_verifications(future)), 0)
+        self.assertEqual(self.gateway.banned, [])
+        self.assertFalse(self.repository.claim_expired_verification(
+            -100123, 68, OnboardingState.SECONDARY_VERIFICATION_PENDING, future.isoformat()
+        ))
+        with patch("misakabot.onboarding.datetime", wraps=datetime) as clock:
+            clock.now.return_value = future
+            resumed = asyncio.run(self.service.resume_undelivered_group_challenges(
+                frozenset({-100123})
+            ))
+        self.assertEqual(resumed, 1)
+        self.assertEqual(len(self.gateway.group_challenges), 1)
+        self.assertEqual(asyncio.run(self.service.expire_pending_verifications(
+            future + timedelta(minutes=3)
+        )), 1)
+        self.assertEqual(self.gateway.banned, [(-100123, 68)])
+
+    def test_recovery_does_not_overwrite_a_challenge_approved_since_scan(self) -> None:
+        pending = asyncio.run(self.service.start_direct_join(DirectJoinInput(
+            chat_id=-100123, user_id=69,
+        )))
+        asyncio.run(self.service.resolve_group_challenge_by_admin(
+            pending.callback_data or "", approved=True
+        ))
+        with patch.object(self.repository, "undelivered_group_challenges", return_value=[
+            (-100123, 69, None, "direct_join")
+        ]):
+            self.assertEqual(asyncio.run(self.service.resume_undelivered_group_challenges(
+                frozenset({-100123})
+            )), 0)
+        self.assertEqual(len(self.gateway.group_challenges), 1)
+        self.assertEqual(len(self.gateway.restricted), 1)
+        self.assertEqual(self.repository.onboarding_state(-100123, 69),
+                         OnboardingState.PENDING_FIRST_MESSAGE)
+
+    def test_active_delivery_attempt_is_not_recovered_concurrently(self) -> None:
+        now = datetime.now(timezone.utc)
+        self.repository.create_group_challenge(
+            chat_id=-100123, user_id=70, username=None, token_hash="active-send",
+            answer_index=0, expires_at=(now + timedelta(minutes=2)).isoformat(),
+            now=now.isoformat(), verification_flow="direct_join",
+        )
+        self.assertEqual(asyncio.run(self.service.resume_undelivered_group_challenges(
+            frozenset({-100123})
+        )), 0)
+        self.assertEqual(self.gateway.group_challenges, [])
+
+    def test_undelivered_challenge_stops_retrying_and_expires_after_grace(self) -> None:
+        started = datetime.now(timezone.utc) - timedelta(hours=1)
+        self.repository.create_group_challenge(
+            chat_id=-100123, user_id=71, username=None, token_hash="never-sent",
+            answer_index=0, expires_at=(started + timedelta(minutes=2)).isoformat(),
+            now=started.isoformat(), verification_flow="direct_join",
+        )
+        self.assertEqual(asyncio.run(self.service.resume_undelivered_group_challenges(
+            frozenset({-100123})
+        )), 0)
+        self.assertEqual(self.gateway.group_challenges, [])
+        self.assertEqual(asyncio.run(self.service.expire_pending_verifications()), 1)
+        self.assertEqual(self.gateway.banned, [(-100123, 71)])
 
     def test_first_observed_message_is_reviewed_for_existing_members_too(self) -> None:
         observed_at = datetime.now(timezone.utc)
@@ -566,6 +830,28 @@ class OnboardingServiceTests(unittest.TestCase):
             self.repository.onboarding_state(-100123, 94), OnboardingState.VERIFICATION_PENDING
         )
 
+    def test_missing_member_lookup_proceeds_to_decline_instead_of_retrying_forever(self) -> None:
+        now = datetime.now(timezone.utc)
+        self.gateway = MissingMemberLookupGateway()
+        self.service = OnboardingService(
+            self.repository, self.gateway, join_verify_url="https://dashboard.example/join-verify"
+        )
+        request = JoinRequestInput(
+            chat_id=-100123,
+            user_id=95,
+            user_chat_id=9500,
+            requested_at=now,
+        )
+        asyncio.run(self.service.start(request))
+
+        completed = asyncio.run(
+            self.service.expire_pending_verifications(now + timedelta(minutes=6))
+        )
+
+        self.assertEqual(completed, 1)
+        self.assertEqual(self.gateway.declined, [(-100123, 95)])
+        self.assertIsNone(self.repository.onboarding_state(-100123, 95))
+
     def test_deactivated_user_expiry_is_closed_without_retrying(self) -> None:
         now = datetime.now(timezone.utc)
         self.gateway = DeactivatedUserGateway()
@@ -585,6 +871,22 @@ class OnboardingServiceTests(unittest.TestCase):
         self.assertEqual(asyncio.run(self.service.expire_pending_verifications(expiry_check_at)), 0)
         self.assertEqual(self.gateway.initial_verification_results, [])
         self.assertIsNone(self.repository.onboarding_state(-100123, 78))
+
+    def test_deactivated_membership_lookup_does_not_leave_pending_record(self) -> None:
+        now = datetime.now(timezone.utc)
+        gateway = DeactivatedMemberLookupGateway()
+        service = OnboardingService(
+            self.repository, gateway, join_verify_url="https://dashboard.example/join-verify"
+        )
+        request = JoinRequestInput(
+            chat_id=-100123, user_id=78, user_chat_id=7800, requested_at=now,
+        )
+        asyncio.run(service.start(request))
+        expiry_check_at = now + timedelta(minutes=6)
+        self.assertEqual(asyncio.run(service.expire_pending_verifications(expiry_check_at)), 1)
+        self.assertEqual(asyncio.run(service.expire_pending_verifications(expiry_check_at)), 0)
+        self.assertIsNone(self.repository.onboarding_state(-100123, 78))
+        self.assertEqual(gateway.initial_verification_results, [])
 
     def test_missing_hidden_requester_expiry_is_closed_without_retrying(self) -> None:
         now = datetime.now(timezone.utc)
@@ -631,13 +933,17 @@ class OnboardingServiceTests(unittest.TestCase):
                 DirectJoinInput(
                     chat_id=-100123,
                     user_id=88,
-                    joined_at=now - timedelta(minutes=11),
+                    joined_at=now,
                 )
             )
         )
 
-        expired_count = asyncio.run(self.service.expire_pending_verifications(now))
+        # The answer timer starts when the prompt is delivered.
+        expired_count = asyncio.run(
+            self.service.expire_pending_verifications(now + timedelta(minutes=11))
+        )
 
         self.assertEqual(expired_count, 1)
         self.assertEqual(self.gateway.banned, [(-100123, 88)])
+        self.assertEqual(self.gateway.ban_durations, [1])
         self.assertEqual(self.gateway.replaced_group_delete_after[-1], 60)

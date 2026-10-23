@@ -83,6 +83,7 @@ def build_onboarding_router(
                     chat_id=event.chat.id,
                     user_id=member.id,
                     username=member.username,
+                    display_name=member.full_name,
                     joined_at=event.date,
                 )
             )
@@ -117,6 +118,7 @@ def build_onboarding_router(
                     chat_id=message.chat.id,
                     user_id=member.id,
                     username=member.username,
+                    display_name=member.full_name,
                     joined_at=message.date,
                 )
             )
@@ -125,7 +127,13 @@ def build_onboarding_router(
     async def receive_group_vps_challenge(callback: CallbackQuery) -> None:
         if callback.from_user is None or not callback.data:
             return
-        outcome = await onboarding.verify_group_challenge(callback.data, callback.from_user.id)
+        # Only the bound member can answer, so the clicker's identity labels the next question.
+        outcome = await onboarding.verify_group_challenge(
+            callback.data,
+            callback.from_user.id,
+            username=callback.from_user.username,
+            display_name=callback.from_user.full_name,
+        )
         logger.info(
             "group_challenge.completed user_id=%s accepted=%s state=%s",
             callback.from_user.id,
@@ -176,7 +184,7 @@ def build_onboarding_router(
         if not token:
             await callback.answer("管理员操作无效。", show_alert=True)
             return
-        outcome = await onboarding.resolve_group_challenge_by_admin(token, approved)
+        outcome = await onboarding.resolve_group_challenge_by_admin(token, approved, chat_id=chat_id)
         logger.info(
             "group_challenge.admin_resolved chat_id=%s actor_user_id=%s accepted=%s state=%s",
             chat_id,
@@ -189,6 +197,6 @@ def build_onboarding_router(
     @router.callback_query(F.data.startswith("join_verify:"))
     async def reject_legacy_group_verification(callback: CallbackQuery) -> None:
         # Old deployments had a click-to-pass callback. Never let it bypass the new challenge.
-        await callback.answer("旧验证按钮已失效，请等待新的 VPS 安全验证题目。", show_alert=True)
+        await callback.answer("旧验证按钮已失效，请等待新的行业黑话验证题目。", show_alert=True)
 
     return router

@@ -2,11 +2,16 @@ from __future__ import annotations
 
 import asyncio
 import ipaddress
+import logging
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 
 import httpx
+
+
+logger = logging.getLogger(__name__)
+logger.addHandler(logging.NullHandler())
 
 
 class EmbyItemNotFoundError(RuntimeError):
@@ -62,21 +67,38 @@ class EmbyClient:
                     return resolved
         return None
 
-    async def list_episodes_for_series(self, series_ids: list[int]) -> list[Mapping[str, object]]:
-        """Fetch episodes only for tracked Emby series, with bounded parallelism."""
+    async def list_episodes_for_series(
+        self, series_ids: list[int]
+    ) -> tuple[list[Mapping[str, object]], tuple[int, ...]]:
+        """Fetch tracked episodes without letting one removed series fail the batch."""
         semaphore = asyncio.Semaphore(8)
 
-        async def fetch(series_id: int) -> list[Mapping[str, object]]:
+        async def fetch(series_id: int) -> tuple[int, list[Mapping[str, object]] | None]:
             async with semaphore:
-                return await self._list_items(
-                    "Episode",
-                    "SeriesId,SeriesName,SeasonId,SeasonName,ParentId,"
-                    "ParentIndexNumber,IndexNumber,DateCreated,Path",
-                    parent_id=series_id,
-                )
+                try:
+                    page = await self._list_items(
+                        "Episode",
+                        "SeriesId,SeriesName,SeasonId,SeasonName,ParentId,"
+                        "ParentIndexNumber,IndexNumber,DateCreated,Path",
+                        parent_id=series_id,
+                    )
+                except httpx.HTTPStatusError as error:
+                    if error.response.status_code != 404:
+                        raise
+                    # A misrouted proxy also answers 404. Only a successful Emby lookup
+                    # that returns no such series confirms it was removed.
+                    try:
+                        await self.get_series(series_id)
+                    except EmbyItemNotFoundError:
+                        logger.info("emby_series_missing series_id=%s", series_id)
+                        return series_id, None
+                    raise
+                return series_id, page
 
         pages = await asyncio.gather(*(fetch(series_id) for series_id in series_ids))
-        return [episode for page in pages for episode in page]
+        episodes = [episode for _, page in pages if page is not None for episode in page]
+        missing = tuple(series_id for series_id, page in pages if page is None)
+        return episodes, missing
 
     async def list_episodes_by_ids(self, episode_ids: list[str]) -> list[Mapping[str, object]]:
         """Fetch specific legacy episodes in bounded batches for metadata repair."""

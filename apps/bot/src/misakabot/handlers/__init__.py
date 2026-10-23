@@ -28,6 +28,7 @@ def build_dispatcher(
     replies = GroupReplyService(
         bot, onboarding.repository, group_reply_client,
         bot_user_id, bot_username, dmit_knowledge_group_ids,
+        admin.is_authorized_admin,
     )
     dispatcher = Dispatcher()
     # Commands and service messages must precede the catch-all moderation handler.

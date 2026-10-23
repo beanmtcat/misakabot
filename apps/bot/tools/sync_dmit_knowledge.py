@@ -24,11 +24,18 @@ SEED_URL = "https://docs.dmit.io/zh/guide/getting-started/"
 
 
 class DocumentationParser(HTMLParser):
+    _IGNORED_CONTENT_TAGS = {"script", "style", "noscript", "svg", "template"}
+    _VOID_TAGS = {
+        "area", "base", "br", "col", "embed", "hr", "img", "input", "link",
+        "meta", "param", "source", "track", "wbr",
+    }
+
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
         self.title_parts: list[str] = []
         self._inside_title = False
         self._main_depth = 0
+        self._ignored_depth = 0
         self.content_parts: list[str] = []
         self.links: set[str] = set()
 
@@ -38,25 +45,45 @@ class DocumentationParser(HTMLParser):
             self._inside_title = True
         if tag == "main":
             self._main_depth += 1
-        elif self._main_depth:
+        elif self._main_depth and tag not in self._VOID_TAGS:
             self._main_depth += 1
+        if (
+            self._main_depth and tag not in self._VOID_TAGS
+            and (self._ignored_depth or tag in self._IGNORED_CONTENT_TAGS)
+        ):
+            self._ignored_depth += 1
         if tag == "a" and attributes.get("href"):
             self.links.add(attributes["href"] or "")
-        if self._main_depth and tag in {"p", "li", "h1", "h2", "h3", "h4", "pre", "code", "br"}:
+        if (
+            self._main_depth
+            and not self._ignored_depth
+            and tag in {"p", "li", "h1", "h2", "h3", "h4", "pre", "code", "br"}
+        ):
             self.content_parts.append("\n")
 
     def handle_endtag(self, tag: str) -> None:
+        if tag in self._VOID_TAGS:
+            return
+        if tag == "main":
+            self._main_depth = 0
+            self._ignored_depth = 0
+            return
         if tag == "title":
             self._inside_title = False
         if self._main_depth:
+            was_ignored = self._ignored_depth > 0
+            if was_ignored:
+                self._ignored_depth -= 1
             self._main_depth -= 1
-            if tag in {"p", "li", "h1", "h2", "h3", "h4", "pre", "code", "br"}:
+            if not was_ignored and tag in {
+                "p", "li", "h1", "h2", "h3", "h4", "pre", "code", "br"
+            }:
                 self.content_parts.append("\n")
 
     def handle_data(self, data: str) -> None:
         if self._inside_title:
             self.title_parts.append(data)
-        if self._main_depth:
+        if self._main_depth and not self._ignored_depth:
             self.content_parts.append(data)
 
     @property
