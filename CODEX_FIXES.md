@@ -429,3 +429,15 @@ R4、R5 已复核通过。"答错两次 → 退群 → 重进"的复现脚本确
 #### 交付边界
 
 P3 仍未实施；本轮没有新增数据库列或改动迁移。未部署、未提交、未推送，先前未提交修改保留。第四轮上方关于 Bot 与 audit-api 必须一起更新的部署提醒仍然有效，本轮未执行部署。
+
+## 发布记录（2026-10-24 22:18，UTC+8）
+
+收到“发布并提交代码”授权后，本批 P1/P2 与 R1–R6 修复已发布；P3 仍未实施。以下记录取代前面各轮完成时“未部署、未提交”的交付状态，保留历史检查记录。
+
+- **代码版本**：`1e9efa6`，`fix: harden verification recovery and departure handling`，已提交并推送至 `origin/main`。发布包使用该提交的 `git archive`，仅包含 `apps/bot`、`apps/emby-manager`，没有打包本地 Compose、环境文件、密钥或运行数据；服务器现有配置保留。
+- **发布前检查**：Bot 发现 233 项，226 项执行通过、7 项默认 PG 跳过；basedpyright 为 0 errors / 0 warnings / 0 notes；Emby 9 项通过；`git diff --check` 通过。第四轮在本机隔离 PostgreSQL 16.15 临时容器执行的 7 项 PG 集成测试全部通过，详见前节。本次发布未在生产数据库运行测试。
+- **备份**：服务器 `/root/docker/misakabot/.releases/pre-1e9efa6-20261024221700/` 保留 `dragonli.dump`（14,896,359 字节）、`source.tar.gz` 和原运行镜像清单。备份使用 `pg_dump --format=custom`，已用 `pg_restore --list` 验证可读取。原 Bot、审计 API、Emby 镜像另保留 `misakabot-rollback-<服务名>:pre-1e9efa6` 引用。仅保留备份，没有执行恢复或降级。
+- **发布方式**：先构建 `misaka-bot`、`audit-api`、`emby-service` 全部成功，再停止旧 Bot 与审计 API，统一启用新后端，避免新旧验证状态混用。三个容器于 22:18:54 启动，检查时均 running、重启计数 0。数据库加列由新版本初始化执行，Bot 与审计 API 均启动完成，未见迁移异常。
+- **未重启的服务**：`audit-ui`、`postgres` 容器 ID 与发布前一致。未刷新知识库、未修改生产 Compose/环境配置，也未执行群成员测试或手动变更群内历史消息。
+- **运行版本校验**：Bot、审计 API 各 31 个运行文件，Emby 后端 10 个运行文件，SHA-256 与已提交源码全部一致；没有遗漏 Bot 知识库资源。
+- **可用性验证**：服务器本机 Bot / 审计 API / Emby 后端 `/healthz` 均返回 200；公开 `/audit-api/healthz` 返回 `status: ok`，`/audit` 返回 200；无 Telegram 身份的审计事件请求返回 422，没有开放匿名读取。Bot 命令注册成功，检查窗口内三个服务启动日志未见 ERROR / Traceback。
