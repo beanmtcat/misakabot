@@ -144,7 +144,7 @@ LLM_MODEL=...
 LLM_MODE=kimi_coding
 KIMI_API_BASE_URL=https://api.kimi.com/coding/v1
 KIMI_API_KEY=...       # 仅保存在服务器 .env
-KIMI_MODEL=...         # 填入该 Coding Plan 账号实际可用的模型名
+KIMI_MODEL=k3.1-pro    # 审核与群聊回复使用同一模型
 BOT_REPLY_ENABLED=true # 仅在 @Bot 或回复 Bot 消息时调用 Kimi 回复
 ```
 
