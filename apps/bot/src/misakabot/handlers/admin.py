@@ -32,7 +32,7 @@ class AdminActions:
     ) -> None:
         gateway = self.gateway
         await gateway.unban_member(message.chat.id, target_user_id)
-        local_indicator_removed = self.repository.unblock_user(target_user_id)
+        local_indicator_removed = self.repository.unblock_user(target_user_id, message.chat.id)
         logger.warning(
             "admin_unban.completed chat_id=%s actor_user_id=%s target_user_id=%s local_indicator_removed=%s",
             message.chat.id,

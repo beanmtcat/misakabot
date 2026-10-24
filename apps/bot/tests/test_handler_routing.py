@@ -10,7 +10,7 @@ from aiogram import Bot
 from aiogram.client.session.base import BaseSession
 from aiogram.types import Message, Update, User
 
-from misakabot.domain import Action, ModerationOutcome, ModerationVerdict
+from misakabot.domain import Action, JoinVerificationOutcome, ModerationOutcome, ModerationVerdict, OnboardingState
 from misakabot.gateway import AiogramGateway
 from misakabot.handlers import build_dispatcher
 from misakabot.handlers.messages import review_reason
@@ -47,7 +47,7 @@ class HandlerRoutingTests(unittest.IsolatedAsyncioTestCase):
         self.onboarding = OnboardingService(self.repository, self.gateway)
         self.onboarding.start_direct_join = AsyncMock()
         self.onboarding.start = AsyncMock()
-        self.onboarding.mark_member_departed = Mock(return_value=True)
+        self.onboarding.mark_member_departed = AsyncMock(return_value=True)
         self.client = AsyncMock(spec=KimiCodingGroupReplyClient)
         self.client.reply.return_value = "测试回答"
         self.dispatcher = build_dispatcher(
@@ -67,6 +67,24 @@ class HandlerRoutingTests(unittest.IsolatedAsyncioTestCase):
             1,
         )
         self.assertEqual(review_reason(outcome), "AI 判定「account_trade」92%：持续提供账号代付服务")
+
+    async def test_admin_callback_passes_its_bound_chat_and_message_id(self) -> None:
+        self.gateway.is_group_administrator.return_value = True
+        self.onboarding.resolve_group_challenge_by_admin = AsyncMock(return_value=JoinVerificationOutcome(
+            True, OnboardingState.PENDING_FIRST_MESSAGE, "已通过",
+        ))
+        update = Update.model_validate({"update_id": 50, "callback_query": {
+            "id": "admin-test", "chat_instance": "group-instance", "data": "vps_admin_approve:test-token",
+            "from": {"id": 42, "is_bot": False, "first_name": "Admin"},
+            "message": {
+                "message_id": 567, "date": int(datetime.now(timezone.utc).timestamp()),
+                "chat": {"id": -100, "type": "supergroup"}, "text": "验证题卡",
+            },
+        }})
+        await self.dispatcher.feed_update(self.bot, update)
+        self.onboarding.resolve_group_challenge_by_admin.assert_awaited_once_with(
+            "test-token", True, chat_id=-100, callback_message_id=567,
+        )
 
     async def feed_message(self, text: str, *, chat_id: int = -100, **extra: object) -> None:
         message = {
@@ -214,7 +232,8 @@ class HandlerRoutingTests(unittest.IsolatedAsyncioTestCase):
         }})
         await self.dispatcher.feed_update(self.bot, update)
         self.assertNotIn((-100, 42), self.gateway._admin_cache)
-        self.onboarding.mark_member_departed.assert_called_once()
+        self.onboarding.mark_member_departed.assert_awaited_once()
+        self.assertFalse(self.onboarding.mark_member_departed.await_args.kwargs["kicked"])
         self.service.moderate.assert_not_awaited()
 
     async def test_restricted_member_flag_turning_false_marks_departure(self) -> None:
@@ -252,7 +271,21 @@ class HandlerRoutingTests(unittest.IsolatedAsyncioTestCase):
 
         await self.dispatcher.feed_update(self.bot, update)
 
-        self.onboarding.mark_member_departed.assert_called_once()
+        self.onboarding.mark_member_departed.assert_awaited_once()
+        self.onboarding.start_direct_join.assert_not_awaited()
+
+    async def test_kicked_status_is_forwarded_separately_from_voluntary_departure(self) -> None:
+        user = {"id": 43, "is_bot": False, "first_name": "Member"}
+        update = Update.model_validate({"update_id": 41, "chat_member": {
+            "chat": {"id": -100, "type": "supergroup"},
+            "from": {"id": 99, "is_bot": False, "first_name": "Admin"},
+            "date": int(datetime.now(timezone.utc).timestamp()),
+            "old_chat_member": {"status": "member", "user": user},
+            "new_chat_member": {"status": "kicked", "user": user, "until_date": 0},
+        }})
+        await self.dispatcher.feed_update(self.bot, update)
+        self.onboarding.mark_member_departed.assert_awaited_once()
+        self.assertTrue(self.onboarding.mark_member_departed.await_args.kwargs["kicked"])
         self.onboarding.start_direct_join.assert_not_awaited()
 
     async def test_member_join_status_starts_second_stage_on_admin_approval(self) -> None:

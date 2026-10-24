@@ -90,10 +90,11 @@ def build_onboarding_router(
         elif (
             was_member
             and not is_member
-            and new_status != "kicked"
             and not member.is_bot
         ):
-            _ = onboarding.mark_member_departed(event.chat.id, member.id, event.date)
+            _ = await onboarding.mark_member_departed(
+                event.chat.id, member.id, event.date, kicked=new_status == "kicked",
+            )
         logger.info(
             (
                 "group_member_role_changed cache_invalidated chat_id=%s user_id=%s "
@@ -190,7 +191,9 @@ def build_onboarding_router(
         if not token:
             _ = await callback.answer("管理员操作无效。", show_alert=True)
             return
-        outcome = await onboarding.resolve_group_challenge_by_admin(token, approved, chat_id=chat_id)
+        outcome = await onboarding.resolve_group_challenge_by_admin(
+            token, approved, chat_id=chat_id, callback_message_id=callback.message.message_id
+        )
         logger.info(
             "group_challenge.admin_resolved chat_id=%s actor_user_id=%s accepted=%s state=%s",
             chat_id,

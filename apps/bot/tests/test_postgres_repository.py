@@ -50,6 +50,26 @@ class _Connection:
 
 
 class PostgresRepositoryTests(unittest.TestCase):
+    def test_recovery_schema_and_upgrade_are_both_applied_under_initialization_lock(self) -> None:
+        connections = [_Connection(), _Connection()]
+        with patch("psycopg.connect", side_effect=connections):
+            repository = PostgresAuditRepository("postgresql://unused/test")
+            repository.initialize()
+            repository.initialize()
+        for connection in connections:
+            statements = [sql.strip() for sql, _ in connection.executed]
+            self.assertEqual(statements[0], "SELECT pg_advisory_xact_lock(619420431)")
+            create = next(sql for sql in statements if sql.startswith("CREATE TABLE IF NOT EXISTS member_onboarding"))
+            self.assertIn("verification_remaining_seconds INTEGER", create)
+            self.assertIn(
+                "ALTER TABLE member_onboarding ADD COLUMN IF NOT EXISTS verification_remaining_seconds INTEGER",
+                statements,
+            )
+            self.assertIn("verification_ban_until TIMESTAMPTZ", create)
+            self.assertIn("ALTER TABLE member_onboarding ADD COLUMN IF NOT EXISTS verification_ban_until TIMESTAMPTZ", statements)
+            self.assertIn("ALTER TABLE scheduled_message_deletions ADD COLUMN IF NOT EXISTS verification_user_id BIGINT", statements)
+            self.assertTrue(connection.committed)
+
     def test_uses_native_postgres_placeholders_and_jsonb(self) -> None:
         connections: list[_Connection] = []
 

@@ -309,28 +309,67 @@ def create_app(
     async def run_full_tracking_sync() -> dict[str, object]:
         async with sync_lock:
             result: dict[str, object] = {}
-            emby_series = await manager.sync_series()
-            sync_status["series"] = {
-                "last_success_at": datetime.now(timezone.utc).isoformat(),
-                "last_result": emby_series,
-            }
-            result["emby_series"] = emby_series
+            errors: list[tuple[str, Exception]] = []
+            try:
+                emby_series = await manager.sync_series()
+                sync_status["series"] = {
+                    "last_success_at": datetime.now(timezone.utc).isoformat(),
+                    "last_result": emby_series,
+                    "last_error": None,
+                }
+                result["emby_series"] = emby_series
+            except Exception as error:
+                errors.append(("series", error))
+                sync_status["series"].update({
+                    "last_error": str(error),
+                    "last_attempt_at": datetime.now(timezone.utc).isoformat(),
+                })
+                logger.exception("full_tracking_sync.series_failed")
             if settings.moviepilot_base_url and settings.moviepilot_api_token:
-                moviepilot_result = await manager.sync_moviepilot_subscriptions()
-                sync_status["moviepilot_subscriptions"] = {
-                    "last_success_at": datetime.now(timezone.utc).isoformat(),
-                    "last_result": moviepilot_result,
-                    "enabled": True,
-                }
-                result["moviepilot"] = moviepilot_result
+                try:
+                    moviepilot_result = await manager.sync_moviepilot_subscriptions()
+                    sync_status["moviepilot_subscriptions"] = {
+                        "last_success_at": datetime.now(timezone.utc).isoformat(),
+                        "last_result": moviepilot_result,
+                        "last_error": None,
+                        "enabled": True,
+                    }
+                    result["moviepilot"] = moviepilot_result
+                except Exception as error:
+                    errors.append(("moviepilot", error))
+                    sync_status["moviepilot_subscriptions"].update({
+                        "last_error": str(error),
+                        "last_attempt_at": datetime.now(timezone.utc).isoformat(),
+                    })
+                    logger.exception("full_tracking_sync.moviepilot_failed")
             if settings.tmdb_api_token:
-                tracking_result = await manager.sync_series_tracking()
-                sync_status["series_tracking"] = {
-                    "last_success_at": datetime.now(timezone.utc).isoformat(),
-                    "last_result": tracking_result,
-                    "enabled": True,
-                }
-                result["tracking"] = tracking_result
+                if any(stage == "series" for stage, _ in errors):
+                    # TMDB tracking consumes the Emby snapshot; unlike MoviePilot,
+                    # it must not use a snapshot rejected by the archive guard.
+                    sync_status["series_tracking"].update({
+                        "last_error": "本次 Emby 剧集同步失败，跳过依赖该数据的 TMDB 追更同步",
+                        "last_attempt_at": datetime.now(timezone.utc).isoformat(),
+                    })
+                else:
+                    try:
+                        tracking_result = await manager.sync_series_tracking()
+                        sync_status["series_tracking"] = {
+                            "last_success_at": datetime.now(timezone.utc).isoformat(),
+                            "last_result": tracking_result,
+                            "last_error": None,
+                            "enabled": True,
+                        }
+                        result["tracking"] = tracking_result
+                    except Exception as error:
+                        errors.append(("tracking", error))
+                        sync_status["series_tracking"].update({
+                            "last_error": str(error),
+                            "last_attempt_at": datetime.now(timezone.utc).isoformat(),
+                        })
+                        logger.exception("full_tracking_sync.tracking_failed")
+            if errors:
+                detail = "; ".join(f"{stage}: {error}" for stage, error in errors)
+                raise RuntimeError(f"追更同步部分失败：{detail}") from errors[0][1]
             return result
 
     @asynccontextmanager

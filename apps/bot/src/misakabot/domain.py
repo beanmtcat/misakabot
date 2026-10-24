@@ -5,6 +5,7 @@ from datetime import datetime, timezone
 from enum import StrEnum
 
 EMPTY_IDS: frozenset[int] = frozenset()
+MAX_GROUP_CHALLENGE_ATTEMPTS = 3
 
 
 class Action(StrEnum):
@@ -27,6 +28,8 @@ class OnboardingState(StrEnum):
 
     VERIFICATION_PENDING = "verification_pending"
     SECONDARY_VERIFICATION_PENDING = "secondary_verification_pending"
+    VERIFICATION_DEPARTURE_PENDING = "verification_departure_pending"
+    VERIFICATION_DEPARTURE_BANNED = "verification_departure_banned"
     PENDING_FIRST_MESSAGE = "pending_first_message"
     OBSERVING = "observing"
     DECLINED = "declined"

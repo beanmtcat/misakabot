@@ -4,6 +4,7 @@ import json
 from contextlib import closing
 from dataclasses import dataclass
 from datetime import datetime, timedelta
+from math import ceil
 from pathlib import Path
 from typing import LiteralString
 
@@ -12,6 +13,7 @@ from typing_extensions import override
 from .database import DatabaseConnection, PostgresConnection, SqliteConnection
 from .domain import (
     Action,
+    MAX_GROUP_CHALLENGE_ATTEMPTS,
     JoinRequestInput,
     MessageInput,
     ModerationVerdict,
@@ -50,6 +52,16 @@ class GroupChallengeResolution:
     terminal: bool
     attempts_left: int
     expires_at: str | None = None
+
+
+@dataclass(frozen=True)
+class GroupChallengeSnapshot:
+    state: OnboardingState
+    token_hash: str | None
+    expires_at: str | None
+    attempts: int
+    message_id: int | None
+    remaining_seconds: int | None
 
 
 @dataclass(frozen=True)
@@ -114,6 +126,8 @@ class AuditRepository:
                     verification_attempts INTEGER NOT NULL DEFAULT 0,
                     verification_answer_index INTEGER,
                     verification_message_id INTEGER,
+                    verification_remaining_seconds INTEGER,
+                    verification_ban_until TEXT,
                     joined_at TEXT,
                     first_message_at TEXT,
                     created_at TEXT NOT NULL,
@@ -144,6 +158,10 @@ class AuditRepository:
                 _ = connection.execute("ALTER TABLE member_onboarding ADD COLUMN verification_answer_index INTEGER")
             if "verification_message_id" not in columns:
                 _ = connection.execute("ALTER TABLE member_onboarding ADD COLUMN verification_message_id INTEGER")
+            if "verification_remaining_seconds" not in columns:
+                _ = connection.execute("ALTER TABLE member_onboarding ADD COLUMN verification_remaining_seconds INTEGER")
+            if "verification_ban_until" not in columns:
+                _ = connection.execute("ALTER TABLE member_onboarding ADD COLUMN verification_ban_until TEXT")
             _ = connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS blocked_indicators (
@@ -268,10 +286,14 @@ class AuditRepository:
                     chat_id INTEGER NOT NULL,
                     message_id INTEGER NOT NULL,
                     due_at TEXT NOT NULL,
+                    verification_user_id INTEGER,
                     PRIMARY KEY(chat_id, message_id)
                 )
                 """
             )
+            deletion_columns = {row[1] for row in connection.execute("PRAGMA table_info(scheduled_message_deletions)")}
+            if "verification_user_id" not in deletion_columns:
+                _ = connection.execute("ALTER TABLE scheduled_message_deletions ADD COLUMN verification_user_id INTEGER")
             _ = connection.execute(
                 """
                 CREATE INDEX IF NOT EXISTS idx_scheduled_message_deletions_due
@@ -560,15 +582,25 @@ class AuditRepository:
             connection.commit()
             return int(cursor.rowcount)
 
-    def schedule_message_deletion(self, chat_id: int, message_id: int, due_at: str) -> None:
+    def schedule_message_deletion(
+        self, chat_id: int, message_id: int, due_at: str, *, verification_user_id: int | None = None,
+    ) -> None:
         _ = self.execute_write(
             """
-            INSERT INTO scheduled_message_deletions(chat_id, message_id, due_at)
-            VALUES (%s, %s, %s)
-            ON CONFLICT(chat_id, message_id) DO UPDATE SET due_at=excluded.due_at
+            INSERT INTO scheduled_message_deletions(chat_id, message_id, due_at, verification_user_id)
+            VALUES (%s, %s, %s, %s)
+            ON CONFLICT(chat_id, message_id) DO UPDATE SET due_at=excluded.due_at,
+                verification_user_id=COALESCE(excluded.verification_user_id, scheduled_message_deletions.verification_user_id)
             """,
-            (chat_id, message_id, due_at),
+            (chat_id, message_id, due_at, verification_user_id),
         )
+
+    def cancel_message_deletion(self, chat_id: int, message_id: int) -> bool:
+        """Cancel exactly one card's durable deletion, if it is still queued."""
+        return self.execute_write(
+            "DELETE FROM scheduled_message_deletions WHERE chat_id=%s AND message_id=%s",
+            (chat_id, message_id),
+        ) == 1
 
     def due_message_deletions(self, now: str, limit: int = 100) -> list[tuple[int, int]]:
         rows = self.query_all(
@@ -634,15 +666,23 @@ class AuditRepository:
             )
             connection.commit()
 
-    def unblock_user(self, user_id: int) -> bool:
+    def unblock_user(self, user_id: int, chat_id: int | None = None) -> bool:
         """Remove the local permanent-ban indicator after Telegram has unbanned the account."""
         with closing(self._connect()) as connection:
             cursor = connection.execute(
                 "DELETE FROM blocked_indicators WHERE indicator_type='telegram_user_id' AND indicator_value=%s",
                 (str(user_id),),
             )
+            removed = cursor.rowcount == 1
+            if chat_id is not None:
+                departure = connection.execute(
+                    """UPDATE member_onboarding SET state=%s, verification_ban_until=NULL
+                       WHERE chat_id=%s AND user_id=%s AND state=%s""",
+                    (OnboardingState.DECLINED.value, chat_id, user_id, OnboardingState.VERIFICATION_DEPARTURE_BANNED.value),
+                )
+                removed = removed or departure.rowcount == 1
             connection.commit()
-        return cursor.rowcount == 1
+        return removed
 
     def create_pending_verification(
         self,
@@ -674,8 +714,13 @@ class AuditRepository:
                     state=excluded.state,
                     verification_token_hash=excluded.verification_token_hash,
                     verification_expires_at=excluded.verification_expires_at,
-                    verification_attempts=0, updated_at=excluded.updated_at
-                WHERE %s OR member_onboarding.state NOT IN (%s, %s, %s)
+                    verification_attempts=0, verification_remaining_seconds=NULL,
+                    verification_ban_until=NULL, updated_at=excluded.updated_at
+                WHERE (%s OR member_onboarding.state NOT IN (%s, %s, %s))
+                  AND member_onboarding.state<>%s
+                  AND (member_onboarding.state<>%s OR
+                       (member_onboarding.verification_ban_until IS NOT NULL AND member_onboarding.verification_ban_until<=%s))
+                  AND NOT (member_onboarding.state=%s AND %s)
                 """,
                 (
                     request.chat_id, request.user_id, request.user_chat_id, request.username,
@@ -685,6 +730,9 @@ class AuditRepository:
                     OnboardingState.SECONDARY_VERIFICATION_PENDING.value,
                     OnboardingState.PENDING_FIRST_MESSAGE.value,
                     OnboardingState.OBSERVING.value,
+                    OnboardingState.VERIFICATION_DEPARTURE_PENDING.value,
+                    OnboardingState.VERIFICATION_DEPARTURE_BANNED.value, now,
+                    OnboardingState.SECONDARY_VERIFICATION_PENDING.value, restart_existing,
                 ),
             )
             connection.commit()
@@ -829,7 +877,7 @@ class AuditRepository:
         return cursor.rowcount == 1
 
     def mark_member_departed(self, chat_id: int, user_id: int, now: str) -> bool:
-        """Retire trusted/in-group state after a member voluntarily leaves.
+        """Retire completed verification state after a member voluntarily leaves.
 
         A later join request must start from the first verification stage again. Banned
         users are deliberately untouched so leaving cannot clear a moderation ban.
@@ -839,22 +887,89 @@ class AuditRepository:
                 """
                 UPDATE member_onboarding
                 SET state=%s, verification_token_hash=NULL, verification_expires_at=NULL,
-                    verification_attempts=0, verification_answer_index=NULL,
+                    verification_attempts=0, verification_answer_index=NULL, verification_remaining_seconds=NULL,
                     verification_message_id=NULL, updated_at=%s
-                WHERE chat_id=%s AND user_id=%s AND state IN (%s, %s, %s)
+                WHERE chat_id=%s AND user_id=%s AND state IN (%s, %s)
+                  AND verification_token_hash IS NULL
                 """,
                 (
                     OnboardingState.DECLINED.value,
                     now,
                     chat_id,
                     user_id,
-                    OnboardingState.SECONDARY_VERIFICATION_PENDING.value,
                     OnboardingState.PENDING_FIRST_MESSAGE.value,
                     OnboardingState.OBSERVING.value,
                 ),
             )
             connection.commit()
         return cursor.rowcount == 1
+
+    def departure_blocks_join(self, chat_id: int, user_id: int, now: str) -> bool:
+        row = self.query_one(
+            """SELECT 1 FROM member_onboarding WHERE chat_id=%s AND user_id=%s
+               AND (state=%s OR (state=%s AND (verification_ban_until IS NULL OR verification_ban_until>%s)))""",
+            (chat_id, user_id, OnboardingState.VERIFICATION_DEPARTURE_PENDING.value,
+             OnboardingState.VERIFICATION_DEPARTURE_BANNED.value, now),
+        )
+        return row is not None
+
+    def claim_verification_departure(
+        self, chat_id: int, user_id: int, now: str, *, retry_before: str | None = None,
+        kicked: bool = False,
+    ) -> bool:
+        """Own departure handling before external actions; preserve attempts and budget.
+
+        Answer/admin/expiry transactions serialize with this conditional UPDATE.
+        A pending departure is a durable retry job; updated_at is its lease timestamp.
+        Kicks only retire a still-pending card, never take over another ban action.
+        """
+        target = OnboardingState.DECLINED if kicked else OnboardingState.VERIFICATION_DEPARTURE_PENDING
+        source = OnboardingState.VERIFICATION_DEPARTURE_PENDING if retry_before is not None else OnboardingState.SECONDARY_VERIFICATION_PENDING
+        due_at = (datetime.fromisoformat(now) + timedelta(seconds=60)).isoformat()
+        with closing(self._connect()) as connection:
+            cursor = connection.execute(
+                """UPDATE member_onboarding SET state=%s, verification_token_hash=NULL, updated_at=%s
+                   WHERE chat_id=%s AND user_id=%s AND state=%s AND updated_at<=%s""",
+                (target.value, now, chat_id, user_id, source.value, retry_before or now),
+            )
+            if cursor.rowcount != 1:
+                connection.rollback()
+                return False
+            # Include the active card and any abandoned rotations/placeholders,
+            # scoped to this member rather than guessing from a group's queue.
+            _ = connection.execute(
+                """INSERT INTO scheduled_message_deletions(chat_id, message_id, due_at, verification_user_id)
+                   SELECT chat_id, verification_message_id, %s, user_id FROM member_onboarding
+                   WHERE chat_id=%s AND user_id=%s AND verification_message_id IS NOT NULL
+                   ON CONFLICT(chat_id, message_id) DO UPDATE SET due_at=excluded.due_at,
+                       verification_user_id=excluded.verification_user_id""",
+                (due_at, chat_id, user_id),
+            )
+            _ = connection.execute(
+                """UPDATE scheduled_message_deletions SET due_at=%s
+                   WHERE chat_id=%s AND verification_user_id=%s""", (due_at, chat_id, user_id),
+            )
+            connection.commit()
+        return True
+
+    def pending_verification_departures(self, retry_before: str) -> list[tuple[int, int]]:
+        rows = self.query_all(
+            """SELECT chat_id, user_id FROM member_onboarding WHERE state=%s AND updated_at<=%s
+               ORDER BY updated_at LIMIT 100""",
+            (OnboardingState.VERIFICATION_DEPARTURE_PENDING.value, retry_before),
+        )
+        return [(database_integer(row["chat_id"]), database_integer(row["user_id"])) for row in rows]
+
+    def finish_verification_departure(
+        self, chat_id: int, user_id: int, claimed_at: str, now: str, ban_until: str | None,
+    ) -> bool:
+        return self.execute_write(
+            """UPDATE member_onboarding SET state=%s, verification_ban_until=%s,
+                   verification_expires_at=NULL, verification_remaining_seconds=NULL, updated_at=%s
+               WHERE chat_id=%s AND user_id=%s AND state=%s AND updated_at=%s""",
+            (OnboardingState.VERIFICATION_DEPARTURE_BANNED.value, ban_until, now, chat_id, user_id,
+             OnboardingState.VERIFICATION_DEPARTURE_PENDING.value, claimed_at),
+        ) == 1
 
     def onboarding_state(self, chat_id: int, user_id: int) -> OnboardingState | None:
         with closing(self._connect()) as connection:
@@ -941,6 +1056,24 @@ class AuditRepository:
             ).fetchall()
         return [(database_integer(row[0]), database_integer(row[1]), _optional_text(row[2]), str(row[3])) for row in rows]
 
+    def group_challenge_snapshot(self, chat_id: int, user_id: int) -> GroupChallengeSnapshot | None:
+        row = self.query_one(
+            """SELECT state, verification_token_hash, verification_expires_at,
+                      verification_attempts, verification_message_id, verification_remaining_seconds
+               FROM member_onboarding WHERE chat_id=%s AND user_id=%s""",
+            (chat_id, user_id),
+        )
+        if row is None:
+            return None
+        return GroupChallengeSnapshot(
+            OnboardingState(str(row["state"])),
+            _optional_text(row["verification_token_hash"]),
+            _optional_timestamp(row["verification_expires_at"]),
+            database_integer(row["verification_attempts"]),
+            database_integer(row["verification_message_id"]) if row["verification_message_id"] is not None else None,
+            database_integer(row["verification_remaining_seconds"]) if row["verification_remaining_seconds"] is not None else None,
+        )
+
     def create_group_challenge(
         self,
         *,
@@ -958,24 +1091,38 @@ class AuditRepository:
         """Persist a one-time post-join challenge; correct option is never exposed in callback data."""
         if only_if_undelivered:
             with closing(self._connect()) as connection:
+                row = connection.execute(
+                    """SELECT verification_expires_at, verification_remaining_seconds,
+                              verification_attempts, updated_at
+                       FROM member_onboarding WHERE chat_id=%s AND user_id=%s""",
+                    (chat_id, user_id),
+                ).fetchone()
+                if row is None:
+                    return False
+                remaining = database_integer(row[1]) if row[1] is not None else None
+                if remaining is None and database_integer(row[2]) > 0:
+                    # Recovery after a crash (or an older release) has no saved
+                    # pause yet. Freeze at the last persisted delivery/edit
+                    # attempt, never at a caller-supplied future deadline.
+                    remaining = self._remaining_answer_seconds(row[0], row[3])
                 cursor = connection.execute(
                     """UPDATE member_onboarding
                     SET verification_token_hash=%s,
-                        verification_answer_index=%s, updated_at=%s
+                        verification_answer_index=%s, updated_at=%s, verification_remaining_seconds=%s
                     WHERE chat_id=%s AND user_id=%s AND state=%s
-                      AND verification_message_id IS NULL AND updated_at <= %s""",
+                      AND verification_message_id IS NULL AND updated_at <= %s AND updated_at=%s""",
                     # The original deadline is kept so repeated delivery failures
                     # eventually expire; delivery itself starts the answer timer.
                     (
-                        token_hash, answer_index, now, chat_id, user_id,
+                        token_hash, answer_index, now, remaining, chat_id, user_id,
                         OnboardingState.SECONDARY_VERIFICATION_PENDING.value,
-                        retry_before,
+                        retry_before, row[3],
                     ),
                 )
                 connection.commit()
             return cursor.rowcount == 1
         with closing(self._connect()) as connection:
-            _ = connection.execute(
+            cursor = connection.execute(
                 """
                 INSERT INTO member_onboarding(
                     chat_id, user_id, user_chat_id, username, verification_flow, state,
@@ -987,9 +1134,14 @@ class AuditRepository:
                     state=excluded.state, verification_token_hash=excluded.verification_token_hash,
                     verification_expires_at=excluded.verification_expires_at,
                     verification_attempts=0,
+                    verification_remaining_seconds=NULL,
+                    verification_ban_until=NULL,
                     verification_answer_index=excluded.verification_answer_index,
                     verification_message_id=NULL,
                     updated_at=excluded.updated_at
+                WHERE member_onboarding.state NOT IN (%s, %s)
+                  AND (member_onboarding.state<>%s OR
+                       (member_onboarding.verification_ban_until IS NOT NULL AND member_onboarding.verification_ban_until<=%s))
                 """,
                 (
                     chat_id,
@@ -1003,10 +1155,14 @@ class AuditRepository:
                     answer_index,
                     now,
                     now,
+                    OnboardingState.SECONDARY_VERIFICATION_PENDING.value,
+                    OnboardingState.VERIFICATION_DEPARTURE_PENDING.value,
+                    OnboardingState.VERIFICATION_DEPARTURE_BANNED.value,
+                    now,
                 ),
             )
             connection.commit()
-        return True
+        return cursor.rowcount == 1
 
     def set_group_challenge_message_id(
         self, chat_id: int, user_id: int, message_id: int, now: str, expires_at: str,
@@ -1017,7 +1173,8 @@ class AuditRepository:
             cursor = connection.execute(
                 """
                 UPDATE member_onboarding
-                SET verification_message_id=%s, verification_expires_at=%s, updated_at=%s
+                SET verification_message_id=%s, verification_expires_at=%s, updated_at=%s,
+                    verification_remaining_seconds=NULL
                 WHERE chat_id=%s AND user_id=%s AND state=%s
                   AND verification_token_hash=COALESCE(%s, verification_token_hash)
                 """,
@@ -1045,7 +1202,7 @@ class AuditRepository:
         telegram_user_id: int,
         selected_index: int,
         now: str,
-        max_attempts: int = 3,
+        max_attempts: int = MAX_GROUP_CHALLENGE_ATTEMPTS,
         next_token_hash: str | None = None,
         next_answer_index: int | None = None,
     ) -> GroupChallengeResolution:
@@ -1104,11 +1261,11 @@ class AuditRepository:
             elif next_token_hash is not None:
                 # Protect the old card if a crash interrupts its edit/registration.
                 _ = connection.execute(
-                    """INSERT INTO scheduled_message_deletions(chat_id, message_id, due_at)
-                    VALUES (%s, %s, %s) ON CONFLICT(chat_id, message_id)
-                    DO UPDATE SET due_at=excluded.due_at""",
+                    """INSERT INTO scheduled_message_deletions(chat_id, message_id, due_at, verification_user_id)
+                    VALUES (%s, %s, %s, %s) ON CONFLICT(chat_id, message_id)
+                    DO UPDATE SET due_at=excluded.due_at, verification_user_id=excluded.verification_user_id""",
                     (chat_id, message_id,
-                     (datetime.fromisoformat(now) + timedelta(minutes=30)).isoformat()),
+                     (datetime.fromisoformat(now) + timedelta(minutes=30)).isoformat(), user_id),
                 )
                 _ = connection.execute(
                     """
@@ -1155,17 +1312,42 @@ class AuditRepository:
             if cursor.rowcount != 1:
                 connection.rollback()
                 return False
+            row = connection.execute(
+                """SELECT verification_expires_at, verification_remaining_seconds
+                   FROM member_onboarding WHERE chat_id=%s AND user_id=%s""",
+                (chat_id, user_id),
+            ).fetchone()
+            if row is None:
+                connection.rollback()
+                raise RuntimeError("claimed verification disappeared")
+            if row[1] is None:
+                # The conditional UPDATE above owns this row until commit.
+                # Repeated Bot failures preserve the first frozen budget.
+                _ = connection.execute(
+                    """UPDATE member_onboarding SET verification_remaining_seconds=%s
+                       WHERE chat_id=%s AND user_id=%s""",
+                    (self._remaining_answer_seconds(row[0], now), chat_id, user_id),
+                )
             _ = connection.execute(
-                """INSERT INTO scheduled_message_deletions(chat_id, message_id, due_at)
-                VALUES (%s, %s, %s) ON CONFLICT(chat_id, message_id)
-                DO UPDATE SET due_at=excluded.due_at""",
-                (chat_id, message_id, due_at),
+                """INSERT INTO scheduled_message_deletions(chat_id, message_id, due_at, verification_user_id)
+                VALUES (%s, %s, %s, %s) ON CONFLICT(chat_id, message_id)
+                DO UPDATE SET due_at=excluded.due_at, verification_user_id=excluded.verification_user_id""",
+                (chat_id, message_id, due_at, user_id),
             )
             connection.commit()
         return True
 
+    @staticmethod
+    def _remaining_answer_seconds(deadline: object, paused_at: object) -> int:
+        expires = _optional_timestamp(deadline)
+        paused = _optional_timestamp(paused_at)
+        if expires is None or paused is None:
+            raise RuntimeError("answered challenge is missing its deadline or pause timestamp")
+        return max(0, ceil((datetime.fromisoformat(expires) - datetime.fromisoformat(paused)).total_seconds()))
+
     def resolve_group_challenge_by_admin(
-        self, token_hash: str, now: str, approved: bool, chat_id: int | None = None
+        self, token_hash: str, now: str, approved: bool, chat_id: int | None = None,
+        callback_message_id: int | None = None,
     ) -> GroupChallengeResolution:
         """Let a group administrator settle one active post-join challenge."""
         with closing(self._connect()) as connection:
@@ -1183,18 +1365,18 @@ class AuditRepository:
                 connection.rollback()
                 return GroupChallengeResolution(None, None, None, False, False, 0)
             chat_id, user_id, attempts = map(database_integer, row[:3])
-            message_id = database_integer(row[3]) if row[3] is not None else None
+            message_id = database_integer(row[3]) if row[3] is not None else callback_message_id
             state = OnboardingState.PENDING_FIRST_MESSAGE if approved else OnboardingState.DECLINED
             _ = connection.execute(
                 """
                 UPDATE member_onboarding
-                SET state=%s, updated_at=%s
+                SET state=%s, updated_at=%s, verification_message_id=%s
                 WHERE chat_id=%s AND user_id=%s
                 """,
-                (state.value, now, chat_id, user_id),
+                (state.value, now, message_id, chat_id, user_id),
             )
             connection.commit()
-        return GroupChallengeResolution(chat_id, user_id, message_id, approved, not approved, 3 - attempts)
+        return GroupChallengeResolution(chat_id, user_id, message_id, approved, not approved, MAX_GROUP_CHALLENGE_ATTEMPTS - attempts)
 
     def finalize_group_challenge(self, chat_id: int, user_id: int, now: str) -> None:
         """Clear replay material only after Telegram completed the member action."""
@@ -1203,7 +1385,7 @@ class AuditRepository:
                 """
                 UPDATE member_onboarding
                 SET verification_token_hash=NULL, verification_expires_at=NULL,
-                    verification_answer_index=NULL, updated_at=%s
+                    verification_answer_index=NULL, verification_remaining_seconds=NULL, updated_at=%s
                 WHERE chat_id=%s AND user_id=%s AND state IN (%s, %s)
                 """,
                 (
@@ -1359,12 +1541,12 @@ class AuditRepository:
         return cursor.rowcount == 1
 
     def expired_pending_verifications(
-        self, now: str, delivery_deadline: str = ""
+        self, now: str, delivery_deadline: str
     ) -> list[tuple[int, int, str, OnboardingState, int | None]]:
         """List unverified members whose deadline passed; callers perform Telegram actions.
 
         Undelivered second-stage challenges are included only once their deadline is at
-        or before ``delivery_deadline`` (the default excludes them).
+        or before the explicitly supplied ``delivery_deadline``.
         """
         with closing(self._connect()) as connection:
             rows = connection.execute(
@@ -1401,7 +1583,7 @@ class AuditRepository:
         user_id: int,
         state: OnboardingState,
         now: str,
-        delivery_deadline: str = "",
+        delivery_deadline: str,
     ) -> bool:
         """Atomically reserve an expired verification before a Telegram-side action.
 
@@ -1551,6 +1733,8 @@ CREATE TABLE IF NOT EXISTS member_onboarding (
     verification_attempts INTEGER NOT NULL DEFAULT 0,
     verification_answer_index INTEGER,
     verification_message_id BIGINT,
+    verification_remaining_seconds INTEGER,
+    verification_ban_until TIMESTAMPTZ,
     joined_at TIMESTAMPTZ,
     first_message_at TIMESTAMPTZ,
     created_at TIMESTAMPTZ NOT NULL,
@@ -1637,6 +1821,7 @@ CREATE TABLE IF NOT EXISTS scheduled_message_deletions (
     chat_id BIGINT NOT NULL,
     message_id BIGINT NOT NULL,
     due_at TIMESTAMPTZ NOT NULL,
+    verification_user_id BIGINT,
     PRIMARY KEY(chat_id, message_id)
 );
 CREATE INDEX IF NOT EXISTS idx_scheduled_message_deletions_due
@@ -1695,6 +1880,9 @@ class PostgresAuditRepository(AuditRepository):
                 "ALTER TABLE moderation_events ADD COLUMN IF NOT EXISTS review_message_id BIGINT",
                 "ALTER TABLE moderation_events ADD COLUMN IF NOT EXISTS reviewed_by_user_id BIGINT",
                 "ALTER TABLE moderation_events ADD COLUMN IF NOT EXISTS reviewed_at TIMESTAMPTZ",
+                "ALTER TABLE member_onboarding ADD COLUMN IF NOT EXISTS verification_remaining_seconds INTEGER",
+                "ALTER TABLE member_onboarding ADD COLUMN IF NOT EXISTS verification_ban_until TIMESTAMPTZ",
+                "ALTER TABLE scheduled_message_deletions ADD COLUMN IF NOT EXISTS verification_user_id BIGINT",
             ):
                 _ = connection.execute(statement)
             connection.commit()

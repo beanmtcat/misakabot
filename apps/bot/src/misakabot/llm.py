@@ -5,10 +5,10 @@ import json
 import logging
 import re
 from collections.abc import Mapping
-from typing import Protocol
+from typing import Protocol, TypeGuard
 
 import httpx
-from pydantic import BaseModel, Field, StrictBool
+from pydantic import BaseModel, Field, StrictBool, field_validator
 
 from .domain import ModerationVerdict, NormalizedMessage, SuspicionSignals
 from .signals import FORCED_FIRST_OBSERVED_REASON
@@ -41,12 +41,38 @@ class _CompletionResponse(BaseModel):
     choices: list[_CompletionChoice] = Field(min_length=1)
 
 
+def _is_evidence_array(value: object) -> TypeGuard[list[object]]:
+    return isinstance(value, list)
+
+
 class _ModerationResponse(BaseModel):
     is_ad: StrictBool
-    confidence: float = Field(ge=0, le=1, strict=True)
+    confidence: float = Field(ge=0, le=1, strict=True, allow_inf_nan=False)
     category: str = "other"
     evidence: list[str] = Field(default_factory=list)
     reason: str = ""
+
+    @field_validator("confidence", mode="before")
+    @classmethod
+    def numeric_confidence(cls, value: object) -> object:
+        # Numeric strings carry the same score; boolean strings remain forbidden
+        # for is_ad. Range/finiteness and real-boolean rejection stay with Field.
+        return float(value) if isinstance(value, str) else value
+
+    @field_validator("category", mode="before")
+    @classmethod
+    def safe_category(cls, value: object) -> str:
+        return value if isinstance(value, str) else "other"
+
+    @field_validator("reason", mode="before")
+    @classmethod
+    def safe_reason(cls, value: object) -> str:
+        return value if isinstance(value, str) else ""
+
+    @field_validator("evidence", mode="before")
+    @classmethod
+    def string_evidence(cls, value: object) -> list[str]:
+        return [item for item in value if isinstance(item, str)] if _is_evidence_array(value) else []
 
 
 def _reply_content(response: httpx.Response) -> str:

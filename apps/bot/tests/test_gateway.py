@@ -172,6 +172,43 @@ class GroupChallengeDisplayTests(unittest.IsolatedAsyncioTestCase):
 
 
 class GroupChallengeRotationTests(unittest.IsolatedAsyncioTestCase):
+    async def test_recovery_placeholder_has_no_answers_or_deadline_until_final_edit(self) -> None:
+        bot = Mock(send_message=AsyncMock(return_value=Mock(message_id=12)), edit_message_text=AsyncMock())
+        gateway = AiogramGateway(bot, Mock())
+        choices = (("答案", "vps_verify:token:0"),)
+        await gateway.send_group_vps_challenge(
+            -100, 42, "member", "新题？", choices, 2, preparing=True,
+        )
+        text = bot.send_message.await_args.args[1]
+        self.assertIn("正在恢复入群验证", text)
+        self.assertNotIn("截止时间", text)
+        self.assertNotIn("新题？", text)
+        callbacks = [
+            button.callback_data or ""
+            for row in bot.send_message.await_args.kwargs["reply_markup"].inline_keyboard
+            for button in row
+        ]
+        self.assertFalse(any(callback.startswith("vps_") for callback in callbacks))
+        deadline = "2026-10-24T01:07:25+00:00"
+        await gateway.update_group_vps_challenge(
+            -100, 12, 42, "member", "新题？", choices, 2, 2, expires_at=deadline,
+        )
+        rendered = bot.edit_message_text.await_args.kwargs["text"]
+        self.assertIn("截止时间：10-24 09:07:25", rendered)
+        self.assertNotIn("2 分钟内", rendered)
+
+    async def test_recovered_send_displays_original_absolute_deadline(self) -> None:
+        bot = Mock()
+        bot.send_message = AsyncMock(return_value=Mock(message_id=12))
+        gateway = AiogramGateway(bot, Mock())
+        await gateway.send_group_vps_challenge(
+            -100123, 42, "member", "题目？", (("答案", "vps_verify:token:0"),), 2,
+            expires_at="2026-10-24T01:02:30+00:00",
+        )
+        text = bot.send_message.await_args.args[1]
+        self.assertIn("截止时间：10-24 09:02:30", text)
+        self.assertNotIn("2 分钟内", text)
+
     async def test_rotation_edits_card_with_new_buttons_without_member_lookup(self) -> None:
         bot = Mock()
         bot.edit_message_text = AsyncMock()
@@ -225,6 +262,11 @@ class GroupChallengeOrphanGuardTests(unittest.IsolatedAsyncioTestCase):
             message_id = await gateway.send_group_vps_challenge(
                 -100, 42, "member", "题目？", (("甲", "vps_verify:active:0"),), 2
             )
+            job = repository.query_one(
+                "SELECT verification_user_id FROM scheduled_message_deletions WHERE chat_id=%s AND message_id=%s",
+                (-100, message_id),
+            )
+            self.assertEqual(job["verification_user_id"], 42)
             future = (now + timedelta(hours=1)).isoformat()
             self.assertEqual(repository.due_message_deletions(future), [(-100, 77)])
             self.assertFalse(repository.set_group_challenge_message_id(

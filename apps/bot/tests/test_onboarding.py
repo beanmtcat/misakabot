@@ -21,6 +21,10 @@ class FakeGateway:
         self.verifications: list[tuple[int, str, str | None]] = []
         self.group_challenges: list[tuple[int, int, str, tuple[tuple[str, str], ...], int]] = []
         self.group_challenge_usernames: list[str | None] = []
+        self.sent_group_deadlines: list[str | None] = []
+        self.displayed_group_deadlines: list[str | None] = []
+        self.sent_group_preparing: list[bool] = []
+        self.deleted_messages: list[tuple[int, int]] = []
         self.rotated_challenges: list[tuple[int, str, int]] = []
         self.restricted: list[tuple[int, int, int]] = []
         self.released: list[tuple[int, int]] = []
@@ -62,10 +66,19 @@ class FakeGateway:
         ttl_minutes: int,
         *,
         display_name: str | None = None,
+        expires_at: str | None = None,
+        preparing: bool = False,
     ) -> int:
         self.group_challenges.append((chat_id, user_id, prompt, choices, ttl_minutes))
         self.group_challenge_usernames.append(username)
+        self.sent_group_deadlines.append(expires_at)
+        self.sent_group_preparing.append(preparing)
+        if not preparing:
+            self.displayed_group_deadlines.append(expires_at)
         return 1000 + len(self.group_challenges)
+
+    async def delete_message(self, chat_id: int, message_id: int) -> None:
+        self.deleted_messages.append((chat_id, message_id))
 
     async def update_group_vps_challenge(
         self,
@@ -84,6 +97,7 @@ class FakeGateway:
         # Keep group_challenges[-1] as the question currently shown to the member.
         self.group_challenges.append((chat_id, user_id, prompt, choices, ttl_minutes))
         self.rotated_challenges.append((message_id, prompt, attempts_left))
+        self.displayed_group_deadlines.append(expires_at)
 
     async def replace_group_verification_message(
         self,
@@ -366,7 +380,7 @@ class OnboardingServiceTests(unittest.TestCase):
             self.service.resolve_group_challenge_by_admin(pending.callback_data or "", approved=True)
         )
 
-        self.assertTrue(self.service.mark_member_departed(-100123, 42, datetime.now(timezone.utc)))
+        self.assertTrue(asyncio.run(self.service.mark_member_departed(-100123, 42, datetime.now(timezone.utc))))
         reapplied = asyncio.run(self.service.start(self.request))
 
         self.assertEqual(reapplied.state, OnboardingState.VERIFICATION_PENDING)
@@ -474,6 +488,7 @@ class OnboardingServiceTests(unittest.TestCase):
         )):
             result = asyncio.run(self.service.verify_group_challenge(wrong, 43))
         self.assertIn("正在重新发送", result.reason)
+        remaining_seconds = self.repository.group_challenge_snapshot(-100123, 43).remaining_seconds
         self.assertFalse(asyncio.run(self.service.verify_group_challenge(original_correct, 43)).accepted)
         row = self.repository.query_one(
             "SELECT verification_attempts, verification_message_id FROM member_onboarding WHERE user_id=%s", (43,)
@@ -483,21 +498,233 @@ class OnboardingServiceTests(unittest.TestCase):
         self.assertEqual(asyncio.run(self.service.expire_pending_verifications(
             datetime.now(timezone.utc) + timedelta(minutes=3)
         )), 0)
-        future = datetime.now(timezone.utc) + timedelta(minutes=3)
+        future = (datetime.now(timezone.utc) + timedelta(minutes=3)).replace(microsecond=0)
         with patch("misakabot.onboarding.datetime", wraps=datetime) as clock:
             clock.now.return_value = future
             self.assertEqual(asyncio.run(self.service.resume_undelivered_group_challenges(
                 frozenset({-100123})
             )), 1)
         row = self.repository.query_one(
-            "SELECT verification_attempts FROM member_onboarding WHERE user_id=%s", (43,)
+            "SELECT verification_attempts, verification_expires_at FROM member_onboarding WHERE user_id=%s", (43,)
         )
         self.assertEqual(row["verification_attempts"], 1)
+        self.assertEqual(
+            datetime.fromisoformat(row["verification_expires_at"]),
+            future + timedelta(seconds=max(remaining_seconds, 60)),
+        )
+        self.assertEqual(self.gateway.displayed_group_deadlines[-1], row["verification_expires_at"])
+        self.assertIsNone(self.repository.group_challenge_snapshot(-100123, 43).remaining_seconds)
         self.assertEqual(self.repository.due_message_deletions(future.isoformat()), [(-100123, 1001)])
         for _ in range(2):
             result = asyncio.run(self.service.verify_group_challenge(self._wrong_group_callback(), 43))
         self.assertEqual(result.state, OnboardingState.DECLINED)
         self.assertEqual(self.gateway.ban_durations, [1])
+
+    def test_recovered_rotation_restores_saved_budget_before_original_deadline(self) -> None:
+        self.service.secondary_verification_ttl_minutes = 10
+        asyncio.run(self.service.start_direct_join(DirectJoinInput(chat_id=-100123, user_id=43)))
+        original = self.repository.group_challenge_snapshot(-100123, 43).expires_at
+        with patch.object(self.gateway, "update_group_vps_challenge", new=AsyncMock(side_effect=RuntimeError("edit failed"))):
+            asyncio.run(self.service.verify_group_challenge(self._wrong_group_callback(), 43))
+        remaining_seconds = self.repository.group_challenge_snapshot(-100123, 43).remaining_seconds
+        future = (datetime.now(timezone.utc) + timedelta(minutes=3)).replace(microsecond=0)
+        with patch("misakabot.onboarding.datetime", wraps=datetime) as clock:
+            clock.now.return_value = future
+            self.assertEqual(asyncio.run(self.service.resume_undelivered_group_challenges(frozenset({-100123}))), 1)
+        recovered = self.repository.group_challenge_snapshot(-100123, 43)
+        self.assertEqual(datetime.fromisoformat(recovered.expires_at), future + timedelta(seconds=remaining_seconds))
+        self.assertNotEqual(recovered.expires_at, original)
+        self.assertEqual(recovered.attempts, 1)
+        self.assertEqual(self.gateway.displayed_group_deadlines[-1], recovered.expires_at)
+
+    def test_first_delivery_still_gets_full_time_after_send_succeeds(self) -> None:
+        now = datetime.now(timezone.utc)
+        original_send = self.gateway.send_group_vps_challenge
+        with patch("misakabot.onboarding.datetime", wraps=datetime) as clock:
+            clock.now.return_value = now
+
+            async def delayed_send(*args, **kwargs):
+                clock.now.return_value = now + timedelta(seconds=45)
+                return await original_send(*args, **kwargs)
+
+            with patch.object(self.gateway, "send_group_vps_challenge", side_effect=delayed_send):
+                asyncio.run(self.service.start_direct_join(DirectJoinInput(chat_id=-100123, user_id=43)))
+        snapshot = self.repository.group_challenge_snapshot(-100123, 43)
+        self.assertEqual(datetime.fromisoformat(snapshot.expires_at), now + timedelta(seconds=45, minutes=2))
+        self.assertIsNone(self.gateway.sent_group_deadlines[-1])
+
+    def test_recovery_near_original_deadline_only_grants_minimum_window(self) -> None:
+        self.service.secondary_verification_ttl_minutes = 5
+        asyncio.run(self.service.start_direct_join(DirectJoinInput(chat_id=-100123, user_id=43)))
+        original = datetime.fromisoformat(self.repository.group_challenge_snapshot(-100123, 43).expires_at)
+        failure_at = original - timedelta(seconds=20)
+        with patch("misakabot.onboarding.datetime", wraps=datetime) as clock, patch.object(
+            self.gateway, "update_group_vps_challenge", new=AsyncMock(side_effect=RuntimeError("edit failed"))
+        ):
+            clock.now.return_value = failure_at
+            asyncio.run(self.service.verify_group_challenge(self._wrong_group_callback(), 43))
+        future = (failure_at + timedelta(minutes=3)).replace(microsecond=0)
+        with patch("misakabot.onboarding.datetime", wraps=datetime) as clock:
+            clock.now.return_value = future
+            self.assertEqual(asyncio.run(self.service.resume_undelivered_group_challenges(frozenset({-100123}))), 1)
+        recovered = self.repository.group_challenge_snapshot(-100123, 43)
+        self.assertEqual(datetime.fromisoformat(recovered.expires_at), future + timedelta(seconds=60))
+
+    def test_admin_decision_during_rotation_updates_the_clicked_card(self) -> None:
+        for approved in (True, False):
+            user_id = 440 if approved else 441
+            asyncio.run(self.service.start_direct_join(DirectJoinInput(chat_id=-100123, user_id=user_id)))
+            message_id = self.repository.group_challenge_snapshot(-100123, user_id).message_id
+            wrong = self._wrong_group_callback()
+            original_edit = self.gateway.update_group_vps_challenge
+            events = []
+            original_replace = self.gateway.replace_group_verification_message
+
+            async def record_replace(*args, **kwargs):
+                events.append("final")
+                await original_replace(*args, **kwargs)
+
+            async def interleaved_edit(*args, **kwargs):
+                token = args[5][0][1].split(":")[1]
+                result = await self.service.resolve_group_challenge_by_admin(
+                    token, approved, chat_id=-100123, callback_message_id=message_id,
+                )
+                self.assertEqual(result.accepted, approved)
+                events.append("late_question")
+                await original_edit(*args, **kwargs)
+
+            with self.subTest(approved=approved), patch.object(
+                self.gateway, "update_group_vps_challenge", side_effect=interleaved_edit
+            ), patch.object(self.gateway, "replace_group_verification_message", side_effect=record_replace):
+                with self.assertLogs("misakabot.onboarding", level="WARNING"):
+                    asyncio.run(self.service.verify_group_challenge(wrong, user_id))
+                self.assertEqual(events, ["final", "late_question", "final"])
+                text = self.gateway.replaced_group_verifications[-1][2]
+                self.assertIn("欢迎加入群组" if approved else "二次验证未通过", text)
+                self.assertEqual(self.gateway.replaced_group_verifications[-1][:2], (-100123, message_id))
+                self.assertEqual(self.repository.query_all("SELECT * FROM scheduled_message_deletions"), [])
+
+    def test_admin_callback_fallback_cannot_override_registered_message(self) -> None:
+        pending = asyncio.run(self.service.start_direct_join(DirectJoinInput(chat_id=-100123, user_id=43)))
+        asyncio.run(self.service.resolve_group_challenge_by_admin(
+            pending.callback_data, True, chat_id=-100123, callback_message_id=9999,
+        ))
+        self.assertEqual(self.gateway.replaced_group_verifications[-1][:2], (-100123, 1001))
+
+    def test_rotation_does_not_delete_a_card_adopted_by_an_inflight_admin(self) -> None:
+        async def scenario():
+            await self.service.start_direct_join(DirectJoinInput(chat_id=-100123, user_id=43))
+            wrong = self._wrong_group_callback()
+            started = asyncio.Event()
+            finish = asyncio.Event()
+            tasks = []
+
+            async def slow_release(chat_id, user_id):
+                started.set()
+                await finish.wait()
+                self.gateway.released.append((chat_id, user_id))
+
+            async def interleaved_edit(*args, **kwargs):
+                token = args[5][0][1].split(":")[1]
+                tasks.append(asyncio.create_task(self.service.resolve_group_challenge_by_admin(
+                    token, True, chat_id=-100123, callback_message_id=1001,
+                )))
+                await started.wait()
+
+            with patch.object(self.gateway, "release_member", side_effect=slow_release), patch.object(
+                self.gateway, "update_group_vps_challenge", side_effect=interleaved_edit
+            ):
+                await self.service.verify_group_challenge(wrong, 43)
+                self.assertEqual(self.gateway.deleted_messages, [])
+                finish.set()
+                await asyncio.gather(*tasks)
+            self.assertIn("欢迎加入群组", self.gateway.replaced_group_verifications[-1][2])
+        with self.assertLogs("misakabot.onboarding", level="WARNING"):
+            asyncio.run(scenario())
+
+    def test_admin_final_card_survives_rotation_api_error(self) -> None:
+        asyncio.run(self.service.start_direct_join(DirectJoinInput(chat_id=-100123, user_id=43)))
+
+        async def failed_edit(*args, **kwargs):
+            token = args[5][0][1].split(":")[1]
+            await self.service.resolve_group_challenge_by_admin(
+                token, True, chat_id=-100123, callback_message_id=1001,
+            )
+            raise RuntimeError("Telegram accepted the late edit but its response was lost")
+
+        with patch.object(self.gateway, "update_group_vps_challenge", side_effect=failed_edit):
+            with self.assertLogs("misakabot.onboarding", level="WARNING"):
+                asyncio.run(self.service.verify_group_challenge(self._wrong_group_callback(), 43))
+        self.assertIn("欢迎加入群组", self.gateway.replaced_group_verifications[-1][2])
+        self.assertEqual(len(self.gateway.replaced_group_verifications), 2)
+        self.assertEqual(self.repository.onboarding_state(-100123, 43), OnboardingState.PENDING_FIRST_MESSAGE)
+
+    def test_failed_registration_after_admin_approval_replaces_newly_sent_card(self) -> None:
+        original_send = self.gateway.send_group_vps_challenge
+
+        async def approved_during_send(*args, **kwargs):
+            message_id = await original_send(*args, **kwargs)
+            token = args[4][0][1].split(":")[1]
+            await self.service.resolve_group_challenge_by_admin(token, True, chat_id=-100123)
+            return message_id
+
+        with patch.object(self.gateway, "send_group_vps_challenge", side_effect=approved_during_send):
+            with self.assertLogs("misakabot.onboarding", level="WARNING"):
+                result = asyncio.run(self.service.start_direct_join(DirectJoinInput(chat_id=-100123, user_id=43)))
+        self.assertIsNone(result.callback_data)
+        self.assertEqual(result.state, OnboardingState.PENDING_FIRST_MESSAGE)
+        self.assertEqual(self.gateway.replaced_group_verifications[-1][:2], (-100123, 1001))
+        self.assertIn("欢迎加入群组", self.gateway.replaced_group_verifications[-1][2])
+
+    def test_recovery_with_rejected_registration_is_not_counted_as_sent(self) -> None:
+        now = datetime.now(timezone.utc) - timedelta(minutes=3)
+        self.repository.create_group_challenge(
+            chat_id=-100123, user_id=43, username=None, token_hash="unsent", answer_index=0,
+            expires_at=(now + timedelta(minutes=2)).isoformat(), now=now.isoformat(), verification_flow="join_request",
+        )
+        with patch.object(self.repository, "set_group_challenge_message_id", return_value=False):
+            with self.assertLogs("misakabot.onboarding", level="WARNING"):
+                resumed = asyncio.run(self.service.resume_undelivered_group_challenges(frozenset({-100123})))
+        self.assertEqual(resumed, 0)
+        self.assertEqual(self.gateway.deleted_messages, [(-100123, 1001)])
+
+    def test_failed_delivery_registration_deletes_unregistered_card_and_returns_no_token(self) -> None:
+        with patch.object(self.repository, "set_group_challenge_message_id", return_value=False):
+            with self.assertLogs("misakabot.onboarding", level="WARNING") as logs:
+                result = asyncio.run(self.service.start_direct_join(DirectJoinInput(chat_id=-100123, user_id=43)))
+        self.assertIsNone(result.callback_data)
+        self.assertEqual(self.gateway.deleted_messages, [(-100123, 1001)])
+        self.assertTrue(any("registration_rejected" in entry for entry in logs.output))
+
+    def test_failed_registration_cleanup_error_only_logs_and_keeps_durable_guard(self) -> None:
+        original_send = self.gateway.send_group_vps_challenge
+
+        async def guarded_send(*args, **kwargs):
+            message_id = await original_send(*args, **kwargs)
+            self.repository.schedule_message_deletion(-100123, message_id, datetime.now(timezone.utc).isoformat())
+            return message_id
+
+        with patch.object(self.gateway, "send_group_vps_challenge", side_effect=guarded_send), patch.object(
+            self.repository, "set_group_challenge_message_id", return_value=False
+        ), patch.object(self.gateway, "delete_message", new=AsyncMock(side_effect=RuntimeError("delete failed"))):
+            with self.assertLogs("misakabot.onboarding", level="WARNING") as logs:
+                result = asyncio.run(self.service.start_direct_join(DirectJoinInput(chat_id=-100123, user_id=43)))
+        self.assertIsNone(result.callback_data)
+        self.assertTrue(any("cleanup_failed" in entry for entry in logs.output))
+        self.assertEqual(self.repository.due_message_deletions(
+            (datetime.now(timezone.utc) + timedelta(seconds=61)).isoformat()
+        ), [(-100123, 1001)])
+
+    def test_failed_final_replacement_after_late_edit_rearms_cleanup(self) -> None:
+        pending = asyncio.run(self.service.start_direct_join(DirectJoinInput(chat_id=-100123, user_id=43)))
+        asyncio.run(self.service.resolve_group_challenge_by_admin(pending.callback_data, True, chat_id=-100123))
+        self.assertEqual(self.repository.query_all("SELECT * FROM scheduled_message_deletions"), [])
+        with patch.object(self.gateway, "replace_group_verification_message", new=AsyncMock(side_effect=RuntimeError("edit failed"))):
+            with self.assertLogs("misakabot.onboarding", level="WARNING"):
+                asyncio.run(self.service._handle_unregistered_group_challenge(-100123, 43, 1001))
+        self.assertEqual(self.repository.due_message_deletions(
+            (datetime.now(timezone.utc) + timedelta(seconds=61)).isoformat()
+        ), [(-100123, 1001)])
 
     def test_expiry_cannot_ban_member_during_card_edit(self) -> None:
         asyncio.run(self.service.start_direct_join(DirectJoinInput(chat_id=-100123, user_id=43)))
@@ -657,7 +884,8 @@ class OnboardingServiceTests(unittest.TestCase):
         self.assertEqual(asyncio.run(self.service.expire_pending_verifications(future)), 0)
         self.assertEqual(self.gateway.banned, [])
         self.assertFalse(self.repository.claim_expired_verification(
-            -100123, 68, OnboardingState.SECONDARY_VERIFICATION_PENDING, future.isoformat()
+            -100123, 68, OnboardingState.SECONDARY_VERIFICATION_PENDING, future.isoformat(),
+            self.service._undelivered_challenge_deadline(future),
         ))
         with patch("misakabot.onboarding.datetime", wraps=datetime) as clock:
             clock.now.return_value = future
@@ -750,7 +978,8 @@ class OnboardingServiceTests(unittest.TestCase):
         )
         # Simulate the worker having read the expired record before the administrator acts.
         expiry_check_at = now + timedelta(minutes=11)
-        expired = self.repository.expired_pending_verifications(expiry_check_at.isoformat())
+        delivery_deadline = self.service._undelivered_challenge_deadline(expiry_check_at)
+        expired = self.repository.expired_pending_verifications(expiry_check_at.isoformat(), delivery_deadline)
         self.assertEqual(len(expired), 1)
 
         approved = asyncio.run(
@@ -761,7 +990,7 @@ class OnboardingServiceTests(unittest.TestCase):
         # The worker's stale item is no longer claimable, so it cannot issue a late ban.
         chat_id, user_id, _, state, _ = expired[0]
         self.assertFalse(
-            self.repository.claim_expired_verification(chat_id, user_id, state, expiry_check_at.isoformat())
+            self.repository.claim_expired_verification(chat_id, user_id, state, expiry_check_at.isoformat(), delivery_deadline)
         )
         self.assertEqual(self.gateway.banned, [])
         self.assertEqual(self.repository.onboarding_state(-100123, 91), OnboardingState.PENDING_FIRST_MESSAGE)

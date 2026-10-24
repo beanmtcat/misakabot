@@ -486,15 +486,23 @@ class AiogramGateway:
         ttl_minutes: int,
         *,
         display_name: str | None = None,
+        expires_at: str | None = None,
+        preparing: bool = False,
     ) -> int:
         member_label = await self._group_challenge_member_label(
             chat_id, user_id, username, display_name
         )
         message = await self.bot.send_message(
             chat_id,
-            self._group_challenge_text(member_label, prompt, ttl_minutes),
+            (
+                f"新成员 {member_label} 正在恢复入群验证，请稍候…"
+                if preparing else self._group_challenge_text(member_label, prompt, ttl_minutes, expires_at)
+            ),
             parse_mode="HTML",
-            reply_markup=self._group_challenge_keyboard(user_id, username, choices),
+            reply_markup=(
+                self._member_info_keyboard(user_id, username) if preparing
+                else self._group_challenge_keyboard(user_id, username, choices)
+            ),
         )
         # If the process dies before onboarding stores this ID, the card must not
         # remain forever. No in-process timer: this durable orphan guard is cancelled
@@ -502,6 +510,7 @@ class AiogramGateway:
         self.repository.schedule_message_deletion(
             chat_id, message.message_id,
             (datetime.now(timezone.utc) + timedelta(minutes=ttl_minutes + 30)).isoformat(),
+            verification_user_id=user_id,
         )
         return message.message_id
 

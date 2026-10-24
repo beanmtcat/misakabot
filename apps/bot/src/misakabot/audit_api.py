@@ -231,7 +231,7 @@ def create_app(
         except Exception as error:
             logger.exception("audit_api.restore_telegram_failed event_id=%s", event_id)
             raise HTTPException(status_code=502, detail="Telegram 恢复权限失败，审计记录未更新") from error
-        _ = repository.unblock_user(event["user_id"])
+        _ = repository.unblock_user(event["user_id"], chat_id)
         return _update_review(repository, event_id, chat_id, "false_positive", "release", admin)
 
     _ = app.post("/v1/audit/events/{event_id}/restore")(restore)

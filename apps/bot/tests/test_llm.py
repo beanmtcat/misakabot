@@ -10,6 +10,46 @@ from misakabot.signals import detect_suspicion
 
 
 class KimiModerationClientTests(unittest.TestCase):
+    def judge_payload(self, payload):
+        client = KimiCodingModerationClient(
+            api_key="test-key", model="kimi-coding",
+            transport=httpx.MockTransport(lambda _: httpx.Response(200, json={
+                "choices": [{"message": {"content": json.dumps(payload)}}],
+            })),
+        )
+        message = normalize_message("普通消息")
+        return asyncio.run(client.judge(message, detect_suspicion(message)))
+
+    def test_null_or_non_string_category_falls_back_without_losing_verdict(self) -> None:
+        for category in (None, 42, [], {}):
+            with self.subTest(category=category):
+                verdict = self.judge_payload({"is_ad": False, "confidence": 0.9, "category": category})
+                self.assertFalse(verdict.is_ad)
+                self.assertEqual(verdict.category, "other")
+
+    def test_null_or_non_string_reason_falls_back(self) -> None:
+        for reason in (None, 42, [], {}):
+            with self.subTest(reason=reason):
+                self.assertEqual(self.judge_payload({"is_ad": False, "confidence": 0.9, "reason": reason}).reason, "")
+
+    def test_numeric_string_confidence_is_accepted(self) -> None:
+        for value in ("0.9", " 0.9 ", "0", "1", "9e-1"):
+            with self.subTest(value=value):
+                verdict = self.judge_payload({"is_ad": False, "confidence": value})
+                self.assertEqual(verdict.confidence, float(value))
+
+    def test_non_array_evidence_is_treated_as_empty(self) -> None:
+        for evidence in (None, "不是数组", 42, {}):
+            with self.subTest(evidence=evidence):
+                self.assertEqual(self.judge_payload({"is_ad": False, "confidence": 0.9, "evidence": evidence}).evidence, ())
+
+    def test_non_string_evidence_items_are_dropped(self) -> None:
+        verdict = self.judge_payload({
+            "is_ad": True, "confidence": 0.9, "evidence": ["保留证据", 42, None, {}, False, ["丢弃数组"]],
+        })
+        self.assertEqual(verdict.evidence, ("保留证据",))
+        self.assertTrue(verdict.is_ad)
+
     def test_kimi_accepts_numeric_confidence_boundaries_and_boolean_false(self) -> None:
         for confidence in (0, 1, 0.95):
             with self.subTest(confidence=confidence):
@@ -111,8 +151,12 @@ class KimiModerationClientTests(unittest.TestCase):
             {"is_ad": "true", "confidence": 0.95},
             {"is_ad": 1, "confidence": 0.95},
             {"is_ad": False, "confidence": True},
-            {"is_ad": False, "confidence": 0.95, "evidence": "不是数组"},
-            {"is_ad": False, "confidence": 0.95, "evidence": [42]},
+            {"is_ad": False, "confidence": 1.5},
+            {"is_ad": False, "confidence": -0.1},
+            {"is_ad": False, "confidence": "1.5"},
+            {"is_ad": False, "confidence": "NaN"},
+            {"is_ad": False, "confidence": "Infinity"},
+            {"is_ad": False, "confidence": "false"},
             {"is_ad": False, "confidence": float("nan")},
             {"is_ad": False, "confidence": float("inf")},
         ):

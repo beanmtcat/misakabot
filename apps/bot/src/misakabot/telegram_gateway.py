@@ -67,6 +67,8 @@ class TelegramGateway(Protocol):
         ttl_minutes: int,
         *,
         display_name: str | None = None,
+        expires_at: str | None = None,
+        preparing: bool = False,
     ) -> int: ...
 
     async def update_group_vps_challenge(

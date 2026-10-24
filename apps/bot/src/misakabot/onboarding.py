@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urlencode
 
-from .domain import DirectJoinInput, EMPTY_IDS, JoinRequestInput, JoinVerificationOutcome, OnboardingState
+from .domain import DirectJoinInput, EMPTY_IDS, JoinRequestInput, JoinVerificationOutcome, OnboardingState, MAX_GROUP_CHALLENGE_ATTEMPTS
 from .join_guard import JoinGuard, JoinGuardDecision, JoinGuardMode, JoinGuardPolicy
 from .join_questions import GLOSSARY_QUESTIONS
 from .repository import AuditRepository
@@ -43,6 +43,7 @@ class OnboardingService:
     # Retry window for second-stage prompts Telegram never accepted (bot lost
     # permissions, member already left, ...). Afterwards the normal timeout applies.
     UNDELIVERED_CHALLENGE_GRACE_MINUTES: int = 30
+    RECOVERED_CHALLENGE_MINIMUM_SECONDS: int = 60
     MANUAL_JOIN_WELCOME_TEXT: str = (
         "✅ 管理员已批准入群申请\n\n"
         "欢迎加入群组。请完成下方二次验证；完成前暂不能发言。"
@@ -138,6 +139,13 @@ class OnboardingService:
         )
 
     async def start(self, request: JoinRequestInput) -> PendingJoin:
+        if self.repository.departure_blocks_join(request.chat_id, request.user_id, datetime.now(timezone.utc).isoformat()):
+            try:
+                await self.gateway.decline_join_request(request.chat_id, request.user_id)
+            except Exception as error:
+                if not self._is_terminal_expiry_error(error):
+                    raise
+            return PendingJoin(self.repository.onboarding_state(request.chat_id, request.user_id) or OnboardingState.DECLINED, None)
         guard = self.join_guard.evaluate(request)
         if guard.notify_admins:
             await self._notify_join_guard(request, guard)
@@ -278,15 +286,57 @@ class OnboardingService:
     def join_guard_status(self, chat_id: int) -> tuple[JoinGuardMode, datetime | None]:
         return self.join_guard.status(chat_id)
 
-    def mark_member_departed(self, chat_id: int, user_id: int, departed_at: datetime) -> bool:
-        """Forget in-group verification state when a member voluntarily leaves."""
+    async def mark_member_departed(
+        self, chat_id: int, user_id: int, departed_at: datetime, *, kicked: bool = False,
+    ) -> bool:
+        """An unfinished voluntary departure fails verification; kicks only retire cards."""
+        now = datetime.now(timezone.utc)
+        if self.repository.claim_verification_departure(chat_id, user_id, now.isoformat(), kicked=kicked):
+            if kicked:
+                snapshot = self.repository.group_challenge_snapshot(chat_id, user_id)
+                await self._replace_group_challenge_message(
+                    chat_id, snapshot.message_id if snapshot else None, user_id,
+                    "❌ 入群二次验证已终止\n\n该用户已被移出群组。", delete_after_seconds=60,
+                )
+            else:
+                _ = await self._complete_verification_departure(chat_id, user_id, now.isoformat())
+            return True
+        if kicked:
+            return False
         changed = self.repository.mark_member_departed(chat_id, user_id, departed_at.isoformat())
         if changed:
             logger.info("onboarding.member_departed chat_id=%s user_id=%s", chat_id, user_id)
         return changed
 
+    async def _complete_verification_departure(self, chat_id: int, user_id: int, claimed_at: str) -> bool:
+        snapshot = self.repository.group_challenge_snapshot(chat_id, user_id)
+        try:
+            # An action cannot outlive the two-minute durable retry lease.
+            async with asyncio.timeout(60):
+                await self._ban_failed_verification(chat_id, user_id)
+        except Exception:
+            # Keep the claimed state and all used attempts durably. The maintenance
+            # worker can acquire this job again after its two-minute lease expires.
+            logger.exception("onboarding.departure_ban_failed chat_id=%s user_id=%s", chat_id, user_id)
+            await self._replace_group_challenge_message(
+                chat_id, snapshot.message_id if snapshot else None, user_id,
+                "❌ 入群二次验证未完成，用户已退出群组。封禁处理中。", delete_after_seconds=60,
+            )
+            return False
+        now = datetime.now(timezone.utc)
+        until = (now + timedelta(hours=self.secondary_verification_ban_hours)).isoformat() if self.secondary_verification_ban_hours else None
+        finished = self.repository.finish_verification_departure(chat_id, user_id, claimed_at, now.isoformat(), until)
+        if finished:
+            await self._replace_group_challenge_message(
+                chat_id, snapshot.message_id if snapshot else None, user_id,
+                self.group_challenge_failure_text, delete_after_seconds=60,
+            )
+        return finished
+
     async def start_direct_join(self, joined: DirectJoinInput) -> PendingJoin:
         """Handle ordinary joins where Telegram did not create a join-request update."""
+        if self.repository.departure_blocks_join(joined.chat_id, joined.user_id, datetime.now(timezone.utc).isoformat()):
+            return PendingJoin(self.repository.onboarding_state(joined.chat_id, joined.user_id) or OnboardingState.DECLINED, None)
         existing_state = self.repository.onboarding_state(joined.chat_id, joined.user_id)
         manually_approved = False
         if existing_state is OnboardingState.VERIFICATION_PENDING:
@@ -422,6 +472,16 @@ class OnboardingService:
         if not created:
             state = self.repository.onboarding_state(chat_id, user_id) or OnboardingState.DECLINED
             return PendingJoin(state, None)
+        snapshot = self.repository.group_challenge_snapshot(chat_id, user_id)
+        if (
+            snapshot is None
+            or snapshot.state is not OnboardingState.SECONDARY_VERIFICATION_PENDING
+            or snapshot.token_hash != self._token_hash(token)
+        ):
+            return PendingJoin(snapshot.state if snapshot else OnboardingState.DECLINED, None)
+        recovering = snapshot.remaining_seconds is not None
+        if snapshot.attempts > 0 and not recovering:
+            raise RuntimeError("answered challenge recovery is missing its paused answer budget")
         choices = self._group_choices(options, token)
         await self.gateway.restrict_member(chat_id, user_id, minutes=60 * 24 * 365)
         if display_name is None and not username:
@@ -430,22 +490,64 @@ class OnboardingService:
         message_id = await self.gateway.send_group_vps_challenge(
             chat_id, user_id, username, prompt, choices,
             self.secondary_verification_ttl_minutes, display_name=display_name,
+            preparing=recovering,
         )
+        current_snapshot = self.repository.group_challenge_snapshot(chat_id, user_id)
+        if current_snapshot is None or current_snapshot.state is not OnboardingState.SECONDARY_VERIFICATION_PENDING or current_snapshot.token_hash != self._token_hash(token):
+            await self._handle_unregistered_group_challenge(chat_id, user_id, message_id)
+            return PendingJoin(current_snapshot.state if current_snapshot else OnboardingState.DECLINED, None)
         delivered_at = datetime.now(timezone.utc)
-        _ = self.repository.set_group_challenge_message_id(
+        answer_deadline = (
+            delivered_at + timedelta(seconds=max(
+                snapshot.remaining_seconds or 0, self.RECOVERED_CHALLENGE_MINIMUM_SECONDS
+            )) if recovering
+            else delivered_at + timedelta(minutes=self.secondary_verification_ttl_minutes)
+        )
+        if recovering:
+            # Telegram displays whole seconds. Round upwards once so the shown
+            # deadline exactly matches storage without shortening the minimum.
+            if answer_deadline.microsecond:
+                answer_deadline = (answer_deadline + timedelta(seconds=1)).replace(microsecond=0)
+            try:
+                # The first send is a non-interactive placeholder. Only after
+                # Telegram returns its ID do we compute the one deadline used
+                # by both the final visible card and its database registration.
+                await self.gateway.update_group_vps_challenge(
+                    chat_id, message_id, user_id, username, prompt, choices,
+                    self.secondary_verification_ttl_minutes, max(0, MAX_GROUP_CHALLENGE_ATTEMPTS - snapshot.attempts),
+                    display_name=display_name, expires_at=answer_deadline.isoformat(),
+                )
+            except Exception:
+                recovered = self.repository.retry_failed_group_challenge_edit(
+                    chat_id, user_id, self._token_hash(token), message_id,
+                    datetime.now(timezone.utc).isoformat(),
+                )
+                logger.exception(
+                    "onboarding.recovered_group_challenge_delivery_failed chat_id=%s user_id=%s",
+                    chat_id, user_id,
+                )
+                if not recovered:
+                    await self._handle_unregistered_group_challenge(chat_id, user_id, message_id)
+                return PendingJoin(self.repository.onboarding_state(chat_id, user_id) or OnboardingState.DECLINED, None)
+        registered = self.repository.set_group_challenge_message_id(
             chat_id,
             user_id,
             message_id,
             delivered_at.isoformat(),
-            (delivered_at + timedelta(minutes=self.secondary_verification_ttl_minutes)).isoformat(),
+            answer_deadline.isoformat(),
             token_hash=self._token_hash(token),
         )
+        if not registered:
+            await self._handle_unregistered_group_challenge(chat_id, user_id, message_id)
+            return PendingJoin(self.repository.onboarding_state(chat_id, user_id) or OnboardingState.DECLINED, None)
         logger.info(
-            "onboarding.group_challenge_sent chat_id=%s user_id=%s flow=%s ttl_minutes=%s",
+            "onboarding.group_challenge_sent chat_id=%s user_id=%s flow=%s ttl_minutes=%s expires_at=%s recovered_answer=%s",
             chat_id,
             user_id,
             verification_flow,
             self.secondary_verification_ttl_minutes,
+            answer_deadline.isoformat(),
+            recovering,
         )
         return PendingJoin(OnboardingState.SECONDARY_VERIFICATION_PENDING, token)
 
@@ -676,11 +778,15 @@ class OnboardingService:
                 )
                 if result.expires_at is None:
                     raise RuntimeError("rotated challenge is missing its deadline")
-                _ = self.repository.set_group_challenge_message_id(
+                registered = self.repository.set_group_challenge_message_id(
                     result.chat_id, result.user_id or telegram_user_id, result.message_id,
                     datetime.now(timezone.utc).isoformat(), result.expires_at,
                     token_hash=self._token_hash(next_token),
                 )
+                if not registered:
+                    await self._handle_unregistered_group_challenge(
+                        result.chat_id, result.user_id or telegram_user_id, result.message_id
+                    )
             except Exception:
                 # The member did not receive a usable new question. Recover through
                 # the durable delivery queue; don't expire them on the old answer timer.
@@ -699,6 +805,9 @@ class OnboardingService:
                         False, OnboardingState.SECONDARY_VERIFICATION_PENDING,
                         "题目更新失败，正在重新发送，请稍候。剩余答题次数保留。",
                     )
+                await self._handle_unregistered_group_challenge(
+                    result.chat_id, result.user_id or telegram_user_id, result.message_id
+                )
         return JoinVerificationOutcome(
             False,
             OnboardingState.SECONDARY_VERIFICATION_PENDING,
@@ -706,11 +815,13 @@ class OnboardingService:
         )
 
     async def resolve_group_challenge_by_admin(
-        self, token: str, approved: bool, *, chat_id: int | None = None
+        self, token: str, approved: bool, *, chat_id: int | None = None,
+        callback_message_id: int | None = None,
     ) -> JoinVerificationOutcome:
         """A group administrator may settle an active second-stage verification."""
         result = self.repository.resolve_group_challenge_by_admin(
-            self._token_hash(token), datetime.now(timezone.utc).isoformat(), approved, chat_id
+            self._token_hash(token), datetime.now(timezone.utc).isoformat(), approved, chat_id,
+            callback_message_id if chat_id is not None else None,
         )
         if result.chat_id is None or result.user_id is None:
             return JoinVerificationOutcome(False, OnboardingState.DECLINED, "验证已过期或已处理")
@@ -748,6 +859,51 @@ class OnboardingService:
             reason,
         )
 
+    async def _handle_unregistered_group_challenge(self, chat_id: int, user_id: int, message_id: int) -> None:
+        """Retire a losing delivery, or finish the card after an administrator won."""
+        logger.warning(
+            "onboarding.group_challenge_registration_rejected chat_id=%s user_id=%s message_id=%s",
+            chat_id, user_id, message_id,
+        )
+        try:
+            snapshot = self.repository.group_challenge_snapshot(chat_id, user_id)
+            if snapshot is not None and snapshot.message_id == message_id and snapshot.token_hash is not None:
+                # The administrator adopted this exact card before awaiting
+                # Telegram. They will settle it, or reopen it on API failure.
+                return
+            # An administrator may already have cancelled the rotation guard
+            # before a late edit overwrote their final card. Re-arm cleanup
+            # before another Telegram call, including final-card replacement.
+            self.repository.schedule_message_deletion(
+                chat_id, message_id, (datetime.now(timezone.utc) + timedelta(seconds=60)).isoformat()
+            )
+            if snapshot is not None:
+                if snapshot.state in {OnboardingState.VERIFICATION_DEPARTURE_PENDING, OnboardingState.VERIFICATION_DEPARTURE_BANNED}:
+                    await self._replace_group_challenge_message(
+                        chat_id, message_id, user_id,
+                        self.group_challenge_failure_text if snapshot.state is OnboardingState.VERIFICATION_DEPARTURE_BANNED
+                        else "❌ 入群二次验证未完成，用户已退出群组。封禁处理中。",
+                        delete_after_seconds=60,
+                    )
+                    return
+                if snapshot.token_hash is None and snapshot.state in {
+                    OnboardingState.PENDING_FIRST_MESSAGE, OnboardingState.OBSERVING, OnboardingState.DECLINED,
+                }:
+                    text = (
+                        self.group_challenge_failure_text if snapshot.state is OnboardingState.DECLINED
+                        else self.GROUP_CHALLENGE_WELCOME_TEXT
+                    )
+                    await self._replace_group_challenge_message(chat_id, message_id, user_id, text)
+                    return
+            await self.gateway.delete_message(chat_id, message_id)
+            _ = self.repository.cancel_message_deletion(chat_id, message_id)
+        except Exception:
+            # The gateway's durable orphan guard remains available for retry.
+            logger.exception(
+                "onboarding.unregistered_group_challenge_cleanup_failed chat_id=%s user_id=%s message_id=%s",
+                chat_id, user_id, message_id,
+            )
+
     async def _replace_group_challenge_message(
         self,
         chat_id: int,
@@ -770,6 +926,8 @@ class OnboardingService:
                 if text == self.GROUP_CHALLENGE_WELCOME_TEXT
                 else None,
             )
+            if delete_after_seconds is None:
+                _ = self.repository.cancel_message_deletion(chat_id, message_id)
         except Exception as error:
             # The Telegram action must not be considered failed only because an old challenge
             # message was removed by another moderator.
@@ -814,6 +972,8 @@ class OnboardingService:
         """Reject/ban unverified joins whose deadline passed, retrying Telegram failures later."""
         current = now or datetime.now(timezone.utc)
         timestamp = current.isoformat()
+        retry_before = (current - timedelta(minutes=2)).isoformat()
+        departures = self.repository.pending_verification_departures(retry_before)
         expired = self.repository.expired_pending_verifications(
             timestamp, self._undelivered_challenge_deadline(current)
         )
@@ -828,7 +988,17 @@ class OnboardingService:
             async with semaphore:
                 return await self._expire_pending_verification(record, current, timestamp)
 
-        return sum(await asyncio.gather(*(process(record) for record in expired)))
+        async def retry_departure(record: tuple[int, int]) -> int:
+            async with semaphore:
+                chat_id, user_id = record
+                if self.repository.claim_verification_departure(chat_id, user_id, timestamp, retry_before=retry_before):
+                    return int(await self._complete_verification_departure(chat_id, user_id, timestamp))
+                return 0
+
+        return sum(await asyncio.gather(
+            *(process(record) for record in expired),
+            *(retry_departure(record) for record in departures),
+        ))
 
     async def _expire_pending_verification(
         self,

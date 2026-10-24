@@ -13,8 +13,9 @@ from fastapi.testclient import TestClient
 from misakabot.audit_api import create_app
 from misakabot.config import Settings
 from misakabot.database import DatabaseConnection, PostgresConnection
-from misakabot.domain import Action, MessageInput, ModerationVerdict, ReviewStatus
+from misakabot.domain import Action, MessageInput, ModerationVerdict, ReviewStatus, OnboardingState, JoinRequestInput
 from misakabot.normalizer import normalize_message
+from misakabot.onboarding import OnboardingService
 from misakabot.repository import POSTGRES_SCHEMA, PostgresAuditRepository
 from misakabot.signals import detect_suspicion
 from test_audit_api import signed_init_data
@@ -96,6 +97,73 @@ class PostgresIntegrationTests(unittest.TestCase):
         self.assertEqual(repo.join_guard_state(-1), ("high", until, now, None))
         self.assertEqual(repo.clear_assistant_memories(-1, 2), 1)
 
+    def test_paused_recovery_budget_native_timestamps_and_deletion_cancel(self) -> None:
+        repo = self.repository
+        now = self.now.isoformat()
+        expires = (self.now + timedelta(seconds=120)).isoformat()
+        repo.create_group_challenge(
+            chat_id=-1, user_id=2, username=None, token_hash="first", answer_index=1,
+            expires_at=expires, now=now, verification_flow="join_request",
+        )
+        self.assertTrue(repo.set_group_challenge_message_id(-1, 2, 10, now, expires, "first"))
+        failed_at = self.now + timedelta(seconds=40)
+        repo.resolve_group_challenge(
+            "first", 2, 0, failed_at.isoformat(), next_token_hash="second", next_answer_index=2,
+        )
+        self.assertTrue(repo.retry_failed_group_challenge_edit(-1, 2, "second", 10, failed_at.isoformat()))
+        paused = repo.group_challenge_snapshot(-1, 2)
+        self.assertEqual(paused.remaining_seconds, 80)
+        self.assertEqual(paused.attempts, 1)
+        self.assertTrue(repo.cancel_message_deletion(-1, 10))
+        self.assertFalse(repo.cancel_message_deletion(-1, 10))
+        delivered = failed_at + timedelta(minutes=5)
+        self.assertTrue(repo.create_group_challenge(
+            chat_id=-1, user_id=2, username=None, token_hash="third", answer_index=2,
+            expires_at=(delivered + timedelta(minutes=2)).isoformat(), now=delivered.isoformat(),
+            verification_flow="join_request", only_if_undelivered=True,
+            retry_before=(delivered - timedelta(minutes=2)).isoformat(),
+        ))
+        recovered = repo.group_challenge_snapshot(-1, 2)
+        self.assertEqual(recovered.remaining_seconds, 80)
+        self.assertEqual(recovered.attempts, 1)
+        deadline = (delivered + timedelta(seconds=80)).isoformat()
+        self.assertFalse(repo.set_group_challenge_message_id(-1, 2, 11, delivered.isoformat(), deadline, "second"))
+        self.assertEqual(repo.group_challenge_snapshot(-1, 2).remaining_seconds, 80)
+        self.assertTrue(repo.set_group_challenge_message_id(-1, 2, 11, delivered.isoformat(), deadline, "third"))
+        final = repo.group_challenge_snapshot(-1, 2)
+        self.assertIsNone(final.remaining_seconds)
+        self.assertEqual(final.expires_at, deadline)
+        self.assertEqual(final.attempts, 1)
+
+    def test_departure_claim_retry_cooldown_and_join_request_guards(self) -> None:
+        repo = self.repository
+        now = self.now.isoformat()
+        expires = (self.now + timedelta(minutes=2)).isoformat()
+        repo.create_group_challenge(chat_id=-1, user_id=2, username=None, token_hash="first", answer_index=1,
+                                    expires_at=expires, now=now, verification_flow="join_request")
+        repo.set_group_challenge_message_id(-1, 2, 10, now, expires, "first")
+        repo.resolve_group_challenge("first", 2, 0, now, next_token_hash="second", next_answer_index=1)
+        self.assertTrue(repo.claim_verification_departure(-1, 2, now))
+        self.assertFalse(repo.claim_verification_departure(-1, 2, now))
+        self.assertIsNone(repo.resolve_group_challenge_by_admin("second", now, True, chat_id=-1).chat_id)
+        self.assertFalse(repo.claim_expired_verification(
+            -1, 2, OnboardingState.SECONDARY_VERIFICATION_PENDING, expires,
+            (datetime.fromisoformat(expires) - timedelta(minutes=OnboardingService.UNDELIVERED_CHALLENGE_GRACE_MINUTES)).isoformat(),
+        ))
+        request = JoinRequestInput(chat_id=-1, user_id=2, user_chat_id=2, requested_at=self.now)
+        self.assertFalse(repo.create_pending_verification(request, "reset", expires, restart_existing=True))
+        self.assertFalse(repo.create_group_challenge(chat_id=-1, user_id=2, username=None, token_hash="reset", answer_index=0,
+                                                    expires_at=expires, now=now, verification_flow="direct_join"))
+        retry = self.now + timedelta(minutes=3)
+        self.assertTrue(repo.claim_verification_departure(-1, 2, retry.isoformat(), retry_before=expires))
+        self.assertEqual(repo.group_challenge_snapshot(-1, 2).attempts, 1)
+        until = retry + timedelta(hours=1)
+        self.assertTrue(repo.finish_verification_departure(-1, 2, retry.isoformat(), retry.isoformat(), until.isoformat()))
+        self.assertTrue(repo.departure_blocks_join(-1, 2, retry.isoformat()))
+        self.assertFalse(repo.departure_blocks_join(-1, 2, until.isoformat()))
+        self.assertIn((-1, 10), repo.due_message_deletions(until.isoformat()))
+        self.assertTrue(repo.unblock_user(2, -1))
+
     def test_challenge_rotation_ack_replay_and_admin_scope(self) -> None:
         repo = self.repository
         now = self.now.isoformat()
@@ -148,3 +216,25 @@ class PostgresIntegrationTests(unittest.TestCase):
             self.assertEqual(summary["total"], 3)
             self.assertEqual(summary["permanent_bans"], 1)
             self.assertEqual(summary["pending_review"], 1)
+
+    def test_admin_adopts_inflight_message_with_typed_snapshot(self) -> None:
+        repo = self.repository
+        now = self.now.isoformat()
+        expires = (self.now + timedelta(minutes=2)).isoformat()
+        repo.create_group_challenge(
+            chat_id=-1, user_id=2, username=None, token_hash="first", answer_index=1,
+            expires_at=expires, now=now, verification_flow="join_request",
+        )
+        self.assertTrue(repo.set_group_challenge_message_id(-1, 2, 10, now, expires, "first"))
+        repo.resolve_group_challenge("first", 2, 0, now, next_token_hash="second", next_answer_index=2)
+        snapshot = repo.group_challenge_snapshot(-1, 2)
+        self.assertEqual(snapshot.attempts, 1)
+        self.assertEqual(snapshot.expires_at, expires)
+        self.assertIsNone(snapshot.message_id)
+        self.assertIsNone(repo.resolve_group_challenge_by_admin(
+            "second", now, True, chat_id=-2, callback_message_id=999,
+        ).chat_id)
+        accepted = repo.resolve_group_challenge_by_admin("second", now, True, chat_id=-1, callback_message_id=10)
+        self.assertTrue(accepted.accepted)
+        self.assertEqual(accepted.message_id, 10)
+        self.assertEqual(repo.group_challenge_snapshot(-1, 2).message_id, 10)
