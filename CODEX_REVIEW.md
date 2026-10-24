@@ -116,3 +116,46 @@ cd apps/audit-miniapp && npm ci && npm run build && npm run lint && npm audit --
 - “小鸡”题移除了正确项独有的括号，并加入防回归检查。
 - `fflate` 基础压缩及 satori SVG 冒烟通过；没有 OG 动态生成路由，未将 Node 下 OG 模块加载问题归因于 fflate。
 - `npm audit --omit=dev` 仍报告文档原已列出的 6 个上游高风险依赖项。没有使用强制降级至 vinext 0.0.15 的方式绕过，不将它们描述为已修复。
+
+## 类型警告清理与复查（2026-10-24）
+
+上述 688 条警告及 6 项依赖告警是 10 月 23 日的历史检查结果，本次结果如下。
+
+### 实现
+
+- 将 SQLite / PostgreSQL 适配器抽到 `apps/bot/src/misakabot/database.py`，明确连接、游标、结果行和参数类型；SQLite 行形状经过运行时校验，PostgreSQL 保留原生时间、JSONB、布尔值。没有修改表结构、参数占位符或事务锁策略。
+- 仓储边界验证整数、可空用户名及可空时间字段，处理保存后查询结果为空的情况；PG 防护时间在返回字符串的接口中统一使用 ISO 格式。通用查询仍保留原生字段值。
+- 模型响应使用结构化校验，`is_ad` 必须是真正的布尔值，置信度必须是 0～1 的数值，证据必须是字符串数组。修复旧代码 `bool("false") == True` 的误判风险；格式不符时继续交给既有异常/人工复核流程，不据此封禁。
+- Telegram 身份和外部 JSON 补齐验证边界；管理员接口收到异常响应时仍然拒绝授权。没有用户名的合法用户仍可通过身份验证。
+- FastAPI 参数使用 `Annotated`，保留鉴权依赖、查询约束、请求头别名；回调使用显式注册，保留路由顺序和过滤条件。
+- 补齐类属性类型，明确丢弃不需要的调用结果，去除无效空值判断与隐式字符串拼接歧义；没有降低检查规则、添加 `type: ignore` 或用 `cast` 掩盖问题。
+- 显式声明 `typing-extensions`，将 Pydantic 最低版本提高到包含 `JsonValue` 的 2.5，并同步锁文件；未更换已锁定的依赖版本。
+
+### 验证结果
+
+- Bot：发现 178 项，本地执行的 174 项全部通过，4 项真实 PG 集成测试在未设置测试 DSN 时跳过。
+- 真实 PostgreSQL：上述 4 项集成测试已在现有容器的独立进程中运行并全部通过，覆盖原生字段/游标、会话记忆与防护时间、答题换题/防重放/管理员跨群拒绝、审计 JSONB/SQL 筛选/分页/汇总。所有写入都在连接级临时表中；未运行生产建表或修改正式记录。
+- `basedpyright --pythonpath ../../.venv/bin/python src`：**0 errors、0 warnings、0 notes，退出码 0**；指定 `--pythonversion 3.11` 也通过。
+- `uv lock --offline --check --python ../../.venv/bin/python`：通过（指定根目录虚拟环境和可写临时缓存）。
+- Emby：4 项测试通过。
+- 审计前端：`npm run lint`、`npx tsc --noEmit`、`npm run build` 通过；`npm audit --omit=dev --json` 返回 **0 漏洞**。此前 6 项告警已由上游撤回，不是本次通过忽略规则或强制降级消除。
+- `git diff --check` 通过。仍有上游 Vinext 的 sourcemap/分块提示及 Starlette 测试客户端的弃用提示；它们与本次清零的 Python 静态类型警告不同。
+- 上述为发布前检查；后续发布状态见下节。测试未操作真实群成员。
+
+复跑真实 PG 测试（可在测试数据库执行，脚本自身仅创建临时表）：
+
+```bash
+cd apps/bot
+MISAKABOT_TEST_DATABASE_URL='postgresql://用户:密码@主机:5432/数据库' \
+PYTHONPATH=src:tests ../../.venv/bin/python -m unittest test_postgres_integration -v
+```
+
+## 发布验证（2026-10-24）
+
+- 发布本次类型清理、结构化响应校验及验证文案调整；群消息、验证结果和题目中不再出现“行业黑话”，题库答案、验证次数和超时逻辑不变。
+- 已重建并重启 `misaka-bot`、`audit-api`，启动完成且重启计数均为 0；未重启 `audit-ui`、`emby-service` 或数据库。
+- Bot 命令菜单及 webhook 注册成功；两个容器内各 31 个运行文件（含知识库资源）的 SHA-256 与本地待提交版本一致。
+- Bot、审计 API 的本机健康接口均返回 200；公开 `/audit-api/healthz` 和 `/audit` 返回 200；未携带 Telegram 身份访问审计事件接口返回 422。
+- 部署前再次执行 Bot 测试：174 项通过、4 项 PG 集成测试按环境配置跳过；类型检查仍为 0 错误、0 警告。真实 PG 的 4 项临时表测试已在本次发布前获授权复跑并全部通过。
+- 按部署脚本同步了 17 篇 DMIT 文档；与上一版按 URL 对比无新增、删除或正文变化，只有顺序及同步时间变化。
+- 新文案仅对新发送或随后编辑的消息生效，本次未批量修改、删除群内历史消息。

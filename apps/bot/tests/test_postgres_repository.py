@@ -17,7 +17,7 @@ class _Jsonb:
 
 
 class _Cursor:
-    description = [("id",)]
+    description = [SimpleNamespace(name="id")]
 
     def __init__(self, row: tuple[object, ...] | None = None) -> None:
         self._row = row
@@ -53,16 +53,12 @@ class PostgresRepositoryTests(unittest.TestCase):
     def test_uses_native_postgres_placeholders_and_jsonb(self) -> None:
         connections: list[_Connection] = []
 
-        def connect(_: str) -> _Connection:
+        def connect(_: str, **kwargs: object) -> _Connection:
             connection = _Connection()
             connections.append(connection)
             return connection
 
-        modules = {
-            "psycopg": SimpleNamespace(connect=connect),
-            "psycopg.types.json": SimpleNamespace(Jsonb=_Jsonb),
-        }
-        with patch("misakabot.repository.import_module", side_effect=lambda name: modules[name]):
+        with patch("psycopg.connect", side_effect=connect), patch("psycopg.types.json.Jsonb", _Jsonb):
             repository = PostgresAuditRepository("postgresql://user:pass@postgres:5432/misakabot")
             repository.initialize()
             incoming = MessageInput(

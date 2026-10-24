@@ -4,6 +4,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import StrEnum
 
+EMPTY_IDS: frozenset[int] = frozenset()
+
 
 class Action(StrEnum):
     ALLOW = "allow"

@@ -22,28 +22,27 @@ def build_moderation_router(
 ) -> Router:
     router = Router(name="moderation")
 
-    @router.callback_query(F.data.startswith("moderation_review:"))
     async def resolve_moderation_review(callback: CallbackQuery) -> None:
-        if callback.from_user is None or callback.message is None or not callback.data:
+        if callback.message is None or not callback.data:
             return
         chat_id = callback.message.chat.id
         if chat_id not in allowed_group_ids or not await admin.is_authorized_admin(chat_id, callback.from_user.id):
-            await callback.answer("仅本群管理员可处理。", show_alert=True)
+            _ = await callback.answer("仅本群管理员可处理。", show_alert=True)
             return
         try:
             _, decision, event_value = callback.data.split(":", 2)
             event_id = int(event_value)
         except (TypeError, ValueError):
-            await callback.answer("审核操作无效。", show_alert=True)
+            _ = await callback.answer("审核操作无效。", show_alert=True)
             return
         if decision not in {"ban", "allow"}:
-            await callback.answer("审核操作无效。", show_alert=True)
+            _ = await callback.answer("审核操作无效。", show_alert=True)
             return
 
         now = datetime.now(timezone.utc).isoformat()
         target = service.repository.claim_moderation_review(event_id, chat_id, now)
         if target is None:
-            await callback.answer("该审核已处理或不再待审核。", show_alert=True)
+            _ = await callback.answer("该审核已处理或不再待审核。", show_alert=True)
             return
 
         if decision == "ban":
@@ -56,7 +55,7 @@ def build_moderation_router(
                     "moderation.review_ban_failed event_id=%s chat_id=%s target_user_id=%s",
                     event_id, chat_id, target.user_id,
                 )
-                await callback.answer("封禁失败，审核已恢复为待处理。", show_alert=True)
+                _ = await callback.answer("封禁失败，审核已恢复为待处理。", show_alert=True)
                 return
             try:
                 await service.gateway.delete_message(chat_id, target.message_id)
@@ -64,16 +63,20 @@ def build_moderation_router(
                 source_deleted = False
                 if "message to delete not found" in str(error).casefold():
                     logger.info(
-                        "moderation.review_source_already_absent "
-                        "event_id=%s chat_id=%s message_id=%s",
+                        (
+                            "moderation.review_source_already_absent "
+                            "event_id=%s chat_id=%s message_id=%s"
+                        ),
                         event_id,
                         chat_id,
                         target.message_id,
                     )
                 else:
                     logger.exception(
-                        "moderation.review_source_delete_failed "
-                        "event_id=%s chat_id=%s message_id=%s",
+                        (
+                            "moderation.review_source_delete_failed "
+                            "event_id=%s chat_id=%s message_id=%s"
+                        ),
                         event_id,
                         chat_id,
                         target.message_id,
@@ -87,7 +90,7 @@ def build_moderation_router(
                     event_id, chat_id, target.message_id,
                 )
             service.repository.block_user(target.user_id, "管理员确认广告", now)
-            service.repository.complete_moderation_review(
+            _ = service.repository.complete_moderation_review(
                 event_id, chat_id, callback.from_user.id,
                 Action.PERMANENT_BAN, ReviewStatus.CONFIRMED, now,
             )
@@ -98,7 +101,7 @@ def build_moderation_router(
                 else "已封禁；原消息已不存在或无法删除。"
             )
         else:
-            service.repository.complete_moderation_review(
+            _ = service.repository.complete_moderation_review(
                 event_id, chat_id, callback.from_user.id,
                 Action.ALLOW, ReviewStatus.FALSE_POSITIVE, now,
             )
@@ -119,6 +122,8 @@ def build_moderation_router(
                 "moderation.review_card_replace_failed event_id=%s chat_id=%s review_message_id=%s",
                 event_id, chat_id, callback.message.message_id,
             )
-        await callback.answer(callback_text)
+        _ = await callback.answer(callback_text)
+
+    _ = router.callback_query.register(resolve_moderation_review, F.data.startswith("moderation_review:"))
 
     return router

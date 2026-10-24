@@ -55,14 +55,14 @@ def build_command_router(
     perform_admin_unban = admin.perform_admin_unban
     handle_memory_request = replies.handle_memory_request
 
-    @router.message(Command("start"))
     async def start_private_chat(message: Message) -> None:
         if message.chat.type != "private":
             # Group messages must still reach moderation.
             raise SkipHandler()
-        await message.answer("本 Bot 不提供私聊对话，请在已启用群组中 @我或回复我的消息。")
+        _ = await message.answer("本 Bot 不提供私聊对话，请在已启用群组中 @我或回复我的消息。")
 
-    @router.message(Command("unban"))
+    _ = router.message.register(start_private_chat, Command("start"))
+
     async def unban_member_command(message: Message) -> None:
         if (
             message.from_user is None
@@ -84,16 +84,17 @@ def build_command_router(
             try:
                 target_user_id = int(parts[1].strip())
             except ValueError:
-                await message.answer("用户 ID 必须是数字；或直接回复该用户消息后发送 /unban。")
+                _ = await message.answer("用户 ID 必须是数字；或直接回复该用户消息后发送 /unban。")
                 return
         elif message.reply_to_message and message.reply_to_message.from_user:
             target_user_id = message.reply_to_message.from_user.id
         else:
-            await message.answer("直接回复目标用户的消息发送 /unban，或使用 /unban <Telegram 用户 ID>。")
+            _ = await message.answer("直接回复目标用户的消息发送 /unban，或使用 /unban <Telegram 用户 ID>。")
             return
         await perform_admin_unban(message, target_user_id, message.from_user.id)
 
-    @router.message(Command("audit"))
+    _ = router.message.register(unban_member_command, Command("unban"))
+
     async def open_audit_command(message: Message) -> None:
         if (
             message.from_user is None
@@ -109,7 +110,7 @@ def build_command_router(
             )
             raise SkipHandler()
         if not audit_web_app_url:
-            await message.answer("审计页面尚未配置 AUDIT_WEB_APP_URL。")
+            _ = await message.answer("审计页面尚未配置 AUDIT_WEB_APP_URL。")
             return
         separator = "&" if "?" in audit_web_app_url else "?"
         audit_query = urlencode({
@@ -121,7 +122,7 @@ def build_command_router(
         try:
             await service.gateway.send_private_audit_link(message.from_user.id, audit_url)
         except TelegramForbiddenError:
-            await message.answer("请先私聊 Bot 并发送 /start，再回到此群发送 /audit。")
+            _ = await message.answer("请先私聊 Bot 并发送 /start，再回到此群发送 /audit。")
             return
         await service.gateway.delete_message(message.chat.id, message.message_id)
         logger.info(
@@ -130,7 +131,8 @@ def build_command_router(
             message.from_user.id,
         )
 
-    @router.message(Command("join_guard"))
+    _ = router.message.register(open_audit_command, Command("audit"))
+
     async def join_guard_command(message: Message) -> None:
         if (
             message.from_user is None
@@ -154,7 +156,7 @@ def build_command_router(
             "lockdown": JoinGuardMode.PERMANENT_LOCKDOWN,
         }.get(argument)
         if argument and requested_mode is None:
-            await message.answer("用法：/join_guard、/join_guard auto、/join_guard high、/join_guard lockdown")
+            _ = await message.answer("用法：/join_guard、/join_guard auto、/join_guard high、/join_guard lockdown")
             return
         if requested_mode is not None:
             onboarding.set_join_guard_mode(message.chat.id, requested_mode)
@@ -167,9 +169,10 @@ def build_command_router(
             JoinGuardMode.PERMANENT_LOCKDOWN: "手动完全封锁",
         }
         expiry = format_join_guard_expiry(defense_until)
-        await message.answer(f"当前入群防护：{labels[mode]}{expiry}")
+        _ = await message.answer(f"当前入群防护：{labels[mode]}{expiry}")
 
-    @router.message(Command("memory"))
+    _ = router.message.register(join_guard_command, Command("join_guard"))
+
     async def memory_command(message: Message) -> None:
         if (
             message.from_user is None
@@ -188,10 +191,11 @@ def build_command_router(
         action = {"on": "enable", "off": "disable", "clear": "clear"}.get(argument, "help")
         await handle_memory_request(message, action)
 
+    _ = router.message.register(memory_command, Command("memory"))
+
     def is_addressed_memory_command(message: Message) -> bool:
         return replies.addressed_memory_action(message) is not None
 
-    @router.message(is_addressed_memory_command)
     async def addressed_memory_command(message: Message) -> None:
         if (
             message.from_user is None
@@ -206,26 +210,29 @@ def build_command_router(
         if action is not None:
             await handle_memory_request(message, action)
 
-    @router.callback_query(F.data.startswith("admin_unban:"))
+    _ = router.message.register(addressed_memory_command, is_addressed_memory_command)
+
     async def unban_member_button(callback: CallbackQuery) -> None:
-        if callback.from_user is None or callback.message is None:
+        if callback.message is None:
             return
         if not isinstance(callback.message, Message):
             # Telegram can deliver a callback for an inaccessible/expired message.
             # It has chat metadata but cannot be used for reply/answer operations.
-            await callback.answer("原管理消息已不可访问，请在群内使用 /unban。", show_alert=True)
+            _ = await callback.answer("原管理消息已不可访问，请在群内使用 /unban。", show_alert=True)
             return
         if callback.message.chat.id not in allowed_group_ids or not await is_authorized_admin(
             callback.message.chat.id, callback.from_user.id
         ):
-            await callback.answer("无管理员权限。", show_alert=True)
+            _ = await callback.answer("无管理员权限。", show_alert=True)
             return
         try:
             target_user_id = int((callback.data or "").removeprefix("admin_unban:"))
         except ValueError:
-            await callback.answer("解除封禁请求无效。", show_alert=True)
+            _ = await callback.answer("解除封禁请求无效。", show_alert=True)
             return
         await perform_admin_unban(callback.message, target_user_id, callback.from_user.id)
-        await callback.answer("已解除封禁。")
+        _ = await callback.answer("已解除封禁。")
+
+    _ = router.callback_query.register(unban_member_button, F.data.startswith("admin_unban:"))
 
     return router

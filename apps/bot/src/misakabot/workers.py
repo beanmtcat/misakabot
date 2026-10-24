@@ -4,6 +4,7 @@ import asyncio
 import logging
 from collections.abc import Awaitable, Callable
 
+from .domain import EMPTY_IDS
 from .gateway import AiogramGateway
 from .onboarding import OnboardingService
 
@@ -21,7 +22,7 @@ async def _run_background_operation(
     """Run an idempotent worker operation with bounded transient retries."""
     for attempt in range(len(retry_delays) + 1):
         try:
-            await operation()
+            _ = await operation()
             return True
         except asyncio.CancelledError:
             raise
@@ -49,7 +50,7 @@ async def verification_expiry_worker(
     onboarding: OnboardingService,
     gateway: AiogramGateway | None = None,
     interval_seconds: int = 30,
-    allowed_group_ids: frozenset[int] = frozenset(),
+    allowed_group_ids: frozenset[int] = EMPTY_IDS,
 ) -> None:
     """Keep join-request deadlines enforced even when nobody opens the verification page."""
     try:
@@ -58,14 +59,14 @@ async def verification_expiry_worker(
                 async def retry_undelivered() -> int:
                     return await onboarding.resume_undelivered_group_challenges(allowed_group_ids)
 
-                await _run_background_operation("challenge_delivery", retry_undelivered)
-            await _run_background_operation(
+                _ = await _run_background_operation("challenge_delivery", retry_undelivered)
+            _ = await _run_background_operation(
                 "expiry_iteration", onboarding.expire_pending_verifications
             )
             if gateway is not None:
                 # Deletion queue and webhook retention are independent of an
                 # onboarding failure and must still receive their next retry.
-                await _run_background_operation(
+                _ = await _run_background_operation(
                     "housekeeping", gateway.process_scheduled_message_deletions
                 )
             await asyncio.sleep(interval_seconds)

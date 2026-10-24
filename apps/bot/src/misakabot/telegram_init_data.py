@@ -2,10 +2,16 @@ from __future__ import annotations
 
 import hashlib
 import hmac
-import json
 import time
 from dataclasses import dataclass
 from urllib.parse import parse_qsl
+
+from pydantic import BaseModel, StrictInt
+
+
+class _TelegramUser(BaseModel):
+    id: StrictInt
+    username: str | None = None
 
 
 class InitDataError(ValueError):
@@ -30,10 +36,9 @@ def verify_init_data(init_data: str, bot_token: str, max_age_seconds: int = 600)
         raise InitDataError("Invalid Telegram initData signature")
     try:
         auth_date = int(values["auth_date"])
-        user = json.loads(values["user"])
-        user_id = int(user["id"])
-    except (KeyError, TypeError, ValueError, json.JSONDecodeError) as error:
+        user = _TelegramUser.model_validate_json(values["user"])
+    except (KeyError, TypeError, ValueError) as error:
         raise InitDataError("Malformed Telegram initData") from error
     if auth_date > int(time.time()) + 60 or int(time.time()) - auth_date > max_age_seconds:
         raise InitDataError("Expired Telegram initData")
-    return TelegramIdentity(user_id=user_id, username=user.get("username"))
+    return TelegramIdentity(user_id=user.id, username=user.username)

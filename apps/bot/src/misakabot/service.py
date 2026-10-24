@@ -22,10 +22,10 @@ class ModerationService:
         llm: ModerationClient,
         review_threshold: float = 0.60,
     ) -> None:
-        self.repository = repository
-        self.gateway = gateway
-        self.llm = llm
-        self.review_threshold = review_threshold
+        self.repository: AuditRepository = repository
+        self.gateway: TelegramGateway = gateway
+        self.llm: ModerationClient = llm
+        self.review_threshold: float = review_threshold
 
     async def moderate(
         self,

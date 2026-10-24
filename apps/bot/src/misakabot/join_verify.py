@@ -5,6 +5,8 @@ import logging
 
 import httpx
 
+from .json_data import json_object
+
 logger = logging.getLogger(__name__)
 logger.addHandler(logging.NullHandler())
 
@@ -13,7 +15,7 @@ TURNSTILE_VERIFY_URL = "https://challenges.cloudflare.com/turnstile/v0/siteverif
 
 class TurnstileVerifier:
     def __init__(self, secret_key: str) -> None:
-        self.secret_key = secret_key
+        self.secret_key: str = secret_key
 
     async def verify(self, token: str, remote_ip: str | None = None) -> bool:
         if not self.secret_key or not token:
@@ -23,8 +25,8 @@ class TurnstileVerifier:
             payload["remoteip"] = remote_ip
         async with httpx.AsyncClient(timeout=8.0) as client:
             response = await client.post(TURNSTILE_VERIFY_URL, data=payload)
-            response.raise_for_status()
-        result = response.json()
+            _ = response.raise_for_status()
+        result = json_object(response.content)
         success = result.get("success") is True
         if not success:
             logger.warning("turnstile.rejected error_codes=%s", result.get("error-codes", []))

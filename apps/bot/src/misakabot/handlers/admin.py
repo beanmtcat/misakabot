@@ -17,9 +17,9 @@ class AdminActions:
     def __init__(
         self, gateway: TelegramGateway, repository: AuditRepository, admin_user_ids: frozenset[int]
     ) -> None:
-        self.gateway = gateway
-        self.repository = repository
-        self.admin_user_ids = admin_user_ids
+        self.gateway: TelegramGateway = gateway
+        self.repository: AuditRepository = repository
+        self.admin_user_ids: frozenset[int] = admin_user_ids
 
     async def is_authorized_admin(self, chat_id: int, user_id: int) -> bool:
         # Group moderation must be decided by administrators of that specific
@@ -40,4 +40,4 @@ class AdminActions:
             target_user_id,
             local_indicator_removed,
         )
-        await message.answer("已解除 Telegram 封禁和本地黑名单。请让该用户重新申请入群以接收验证。")
+        _ = await message.answer("已解除 Telegram 封禁和本地黑名单。请让该用户重新申请入群以接收验证。")

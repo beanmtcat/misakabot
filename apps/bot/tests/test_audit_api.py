@@ -1,4 +1,5 @@
 import hashlib
+import asyncio
 import hmac
 import json
 import tempfile
@@ -7,10 +8,12 @@ import unittest
 from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlencode
+from unittest.mock import patch
 
+import httpx
 from fastapi.testclient import TestClient
 
-from misakabot.audit_api import create_app
+from misakabot.audit_api import _build_group_admin_checker, create_app
 from misakabot.config import Settings
 from misakabot.domain import Action, MessageInput, ReviewStatus
 from misakabot.normalizer import normalize_message
@@ -31,6 +34,36 @@ def signed_init_data(token: str, user_id: int) -> str:
 
 
 class AuditApiTests(unittest.TestCase):
+    def test_admin_lookup_fails_closed_on_malformed_telegram_json(self) -> None:
+        for response_body, expected in (
+            ({"ok": True, "result": {"status": "administrator"}}, True),
+            ({"ok": True, "result": {"status": "member"}}, False),
+            ({"ok": True, "result": []}, False),
+            ({"ok": True, "result": {"status": ["administrator"]}}, False),
+            ([], False),
+        ):
+            with self.subTest(response=response_body):
+                client = httpx.AsyncClient(transport=httpx.MockTransport(
+                    lambda _: httpx.Response(200, json=response_body)
+                ))
+                with patch("misakabot.audit_api.httpx.AsyncClient", return_value=client):
+                    checker = _build_group_admin_checker(self._settings(Path("unused")))
+                    self.assertIs(asyncio.run(checker(2, -1)), expected)
+
+    def test_annotated_query_constraints_and_required_headers_are_preserved(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            repository = AuditRepository(Path(directory) / "audit.sqlite3")
+            repository.initialize()
+            with TestClient(create_app(self._settings(Path(repository.database_path)), repository)) as client:
+                self.assertEqual(client.get("/healthz").json(), {"status": "ok"})
+                self.assertEqual(client.get("/v1/audit/events?chat_id=-1").status_code, 422)
+                headers = {"X-Telegram-Init-Data": signed_init_data("123:token", 1)}
+                for suffix in ("limit=0", "limit=101", "before_id=0", "query=" + "a" * 101):
+                    with self.subTest(query=suffix):
+                        self.assertEqual(client.get(
+                            "/v1/audit/events?chat_id=-1&" + suffix, headers=headers
+                        ).status_code, 422)
+
     def _settings(self, database_path: Path) -> Settings:
         return Settings(
             telegram_bot_token="123:token",

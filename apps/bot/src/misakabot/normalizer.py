@@ -22,8 +22,8 @@ def _compact_text(text: str) -> tuple[str, bool]:
 def normalize_message(text: str | None, sender_name: str | None = None) -> NormalizedMessage:
     raw_text = text or ""
     raw_sender_name = sender_name or ""
-    urls = tuple(URL_RE.findall(raw_text))
-    mentions = tuple(f"@{match}" for match in MENTION_RE.findall(raw_text))
+    urls = tuple(match.group() for match in URL_RE.finditer(raw_text))
+    mentions = tuple(f"@{match.group(1)}" for match in MENTION_RE.finditer(raw_text))
     normalized_text, text_had_invisible_chars = _compact_text(raw_text)
     normalized_sender_name, sender_had_invisible_chars = _compact_text(raw_sender_name)
     return NormalizedMessage(

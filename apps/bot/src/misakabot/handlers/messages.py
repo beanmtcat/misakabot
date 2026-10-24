@@ -5,7 +5,7 @@ import logging
 from aiogram import Router
 from aiogram.types import Message
 
-from ..domain import Action, MessageInput
+from ..domain import Action, MessageInput, ModerationOutcome
 from ..group_reply import GroupReplyService
 from ..onboarding import OnboardingService
 from ..service import ModerationService
@@ -15,16 +15,15 @@ logger = logging.getLogger(__name__)
 logger.addHandler(logging.NullHandler())
 
 
-def review_reason(outcome: object) -> str:
+def review_reason(outcome: ModerationOutcome) -> str:
     """Format a concise operator-facing reason without repeating the source post."""
-    verdict = getattr(outcome, "verdict", None)
-    if verdict is not None and getattr(verdict, "reason", ""):
-        reason = " ".join(str(verdict.reason).split())[:180]
-        confidence = round(float(getattr(verdict, "confidence", 0)) * 100)
-        category = " ".join(str(getattr(verdict, "category", "广告")).split())[:40] or "广告"
+    verdict = outcome.verdict
+    if verdict is not None and verdict.reason:
+        reason = " ".join(verdict.reason.split())[:180]
+        confidence = round(verdict.confidence * 100)
+        category = " ".join(verdict.category.split())[:40] or "广告"
         return f"AI 判定「{category}」{confidence}%：{reason}"
-    signals = getattr(outcome, "signals", None)
-    reasons = getattr(signals, "reasons", ()) if signals is not None else ()
+    reasons = outcome.signals.reasons
     detail = "；".join(" ".join(str(reason).split()) for reason in reasons if reason)[:180]
     return f"规则初筛：{detail or '需要管理员人工判断'}"
 
@@ -37,7 +36,6 @@ def build_message_router(
 ) -> Router:
     router = Router(name="messages")
 
-    @router.message()
     async def moderate_incoming(message: Message) -> None:
         if (
             message.from_user is None
@@ -109,7 +107,7 @@ def build_message_router(
                     review_message_id = await service.gateway.send_moderation_review(
                         message.chat.id, message.message_id, outcome.event_id, review_reason(outcome)
                     )
-                    service.repository.set_moderation_review_message(
+                    _ = service.repository.set_moderation_review_message(
                         outcome.event_id, message.chat.id, review_message_id
                     )
                 except Exception:
@@ -138,5 +136,7 @@ def build_message_router(
                     )
                 return
             await replies.handle(message)
+
+    _ = router.message.register(moderate_incoming)
 
     return router

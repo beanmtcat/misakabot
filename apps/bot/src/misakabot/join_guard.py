@@ -52,8 +52,8 @@ class JoinGuard:
     """Persistent, per-group admission flood protection without rotating invite links."""
 
     def __init__(self, repository: AuditRepository, policy: JoinGuardPolicy) -> None:
-        self.repository = repository
-        self.policy = policy
+        self.repository: AuditRepository = repository
+        self.policy: JoinGuardPolicy = policy
 
     def evaluate(
         self, request: JoinRequestInput, now: datetime | None = None

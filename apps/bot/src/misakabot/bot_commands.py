@@ -18,7 +18,7 @@ logger.addHandler(logging.NullHandler())
 
 async def register_bot_commands(bot: Bot, allowed_group_ids: frozenset[int]) -> None:
     """Register contextual Telegram command menus on every application start."""
-    await bot.set_my_commands(
+    _ = await bot.set_my_commands(
         [BotCommand(command="start", description="查看 Bot 使用说明")],
         scope=BotCommandScopeAllPrivateChats(),
     )
@@ -41,7 +41,7 @@ async def register_bot_commands(bot: Bot, allowed_group_ids: frozenset[int]) -> 
                     scope=BotCommandScopeChatAdministrators(chat_id=chat_id),
                     language_code=language_code,
                 )
-        await bot.set_my_commands(
+        _ = await bot.set_my_commands(
             [
                 BotCommand(command="audit", description="查看本群审计日志"),
                 BotCommand(command="unban", description="回复用户消息解除封禁"),

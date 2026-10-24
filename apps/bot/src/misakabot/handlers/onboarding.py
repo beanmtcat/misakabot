@@ -24,7 +24,6 @@ def build_onboarding_router(
     router = Router(name="onboarding")
     is_authorized_admin = admin.is_authorized_admin
 
-    @router.chat_join_request()
     async def receive_join_request(request: ChatJoinRequest) -> None:
         if request.chat.type not in {"group", "supergroup"}:
             logger.warning("join_request.ignored non_group chat_id=%s", request.chat.id)
@@ -33,7 +32,7 @@ def build_onboarding_router(
             logger.warning("join_request.ignored chat_not_allowed chat_id=%s", request.chat.id)
             return
         logger.info("join_request.received chat_id=%s user_id=%s", request.chat.id, request.from_user.id)
-        await onboarding.start(
+        _ = await onboarding.start(
             JoinRequestInput(
                 chat_id=request.chat.id,
                 user_id=request.from_user.id,
@@ -46,7 +45,8 @@ def build_onboarding_router(
             )
         )
 
-    @router.chat_member()
+    _ = router.chat_join_request.register(receive_join_request)
+
     async def receive_member_status_change(event: ChatMemberUpdated) -> None:
         """Apply role changes and use membership transitions as the join signal.
 
@@ -78,7 +78,7 @@ def build_onboarding_router(
                 member.id,
                 event.via_join_request,
             )
-            await onboarding.start_direct_join(
+            _ = await onboarding.start_direct_join(
                 DirectJoinInput(
                     chat_id=event.chat.id,
                     user_id=member.id,
@@ -95,8 +95,10 @@ def build_onboarding_router(
         ):
             _ = onboarding.mark_member_departed(event.chat.id, member.id, event.date)
         logger.info(
-            "group_member_role_changed cache_invalidated chat_id=%s user_id=%s "
-            "old_status=%s new_status=%s was_member=%s is_member=%s",
+            (
+                "group_member_role_changed cache_invalidated chat_id=%s user_id=%s "
+                "old_status=%s new_status=%s was_member=%s is_member=%s"
+            ),
             event.chat.id,
             event.new_chat_member.user.id,
             old_status,
@@ -105,7 +107,8 @@ def build_onboarding_router(
             is_member,
         )
 
-    @router.message(F.new_chat_members)
+    _ = router.chat_member.register(receive_member_status_change)
+
     async def receive_direct_join(message: Message) -> None:
         if message.chat.type not in {"group", "supergroup"} or message.chat.id not in allowed_group_ids:
             return
@@ -113,7 +116,7 @@ def build_onboarding_router(
             if member.is_bot:
                 continue
             logger.info("member_join.received chat_id=%s user_id=%s", message.chat.id, member.id)
-            await onboarding.start_direct_join(
+            _ = await onboarding.start_direct_join(
                 DirectJoinInput(
                     chat_id=message.chat.id,
                     user_id=member.id,
@@ -123,9 +126,10 @@ def build_onboarding_router(
                 )
             )
 
-    @router.callback_query(F.data.startswith("vps_verify:"))
+    _ = router.message.register(receive_direct_join, F.new_chat_members)
+
     async def receive_group_vps_challenge(callback: CallbackQuery) -> None:
-        if callback.from_user is None or not callback.data:
+        if not callback.data:
             return
         # Only the bound member can answer, so the clicker's identity labels the next question.
         outcome = await onboarding.verify_group_challenge(
@@ -140,36 +144,38 @@ def build_onboarding_router(
             outcome.accepted,
             outcome.state,
         )
-        await callback.answer(outcome.reason, show_alert=not outcome.accepted)
+        _ = await callback.answer(outcome.reason, show_alert=not outcome.accepted)
 
-    @router.callback_query(F.data.startswith("user_info:"))
+    _ = router.callback_query.register(receive_group_vps_challenge, F.data.startswith("vps_verify:"))
+
     async def show_member_info(callback: CallbackQuery) -> None:
         """Show profile metadata without relying on tg:// deep-link support in clients."""
-        if callback.from_user is None or callback.message is None or not callback.data:
+        if callback.message is None or not callback.data:
             return
         chat_id = callback.message.chat.id
         if chat_id not in allowed_group_ids or not await is_authorized_admin(chat_id, callback.from_user.id):
-            await callback.answer("仅本群管理员可查看用户信息。", show_alert=True)
+            _ = await callback.answer("仅本群管理员可查看用户信息。", show_alert=True)
             return
         try:
             user_id = int(callback.data.removeprefix("user_info:"))
         except ValueError:
-            await callback.answer("用户信息请求无效。", show_alert=True)
+            _ = await callback.answer("用户信息请求无效。", show_alert=True)
             return
         try:
             details = await service.gateway.get_member_info(chat_id, user_id)
         except Exception:
             logger.exception("member_info.lookup_failed chat_id=%s user_id=%s", chat_id, user_id)
             details = f"用户 ID：{user_id}\n暂时无法读取其他 Telegram 资料。"
-        await callback.answer(details[:190], show_alert=True)
+        _ = await callback.answer(details[:190], show_alert=True)
 
-    @router.callback_query(F.data.startswith("vps_admin_"))
+    _ = router.callback_query.register(show_member_info, F.data.startswith("user_info:"))
+
     async def resolve_group_challenge_as_admin(callback: CallbackQuery) -> None:
-        if callback.from_user is None or callback.message is None or not callback.data:
+        if callback.message is None or not callback.data:
             return
         chat_id = callback.message.chat.id
         if chat_id not in allowed_group_ids or not await is_authorized_admin(chat_id, callback.from_user.id):
-            await callback.answer("无管理员权限。", show_alert=True)
+            _ = await callback.answer("无管理员权限。", show_alert=True)
             return
         approved: bool
         if callback.data.startswith(OnboardingService.GROUP_CHALLENGE_ADMIN_APPROVE_PREFIX):
@@ -179,10 +185,10 @@ def build_onboarding_router(
             approved = False
             token = callback.data.removeprefix(OnboardingService.GROUP_CHALLENGE_ADMIN_REJECT_PREFIX)
         else:
-            await callback.answer("管理员操作无效。", show_alert=True)
+            _ = await callback.answer("管理员操作无效。", show_alert=True)
             return
         if not token:
-            await callback.answer("管理员操作无效。", show_alert=True)
+            _ = await callback.answer("管理员操作无效。", show_alert=True)
             return
         outcome = await onboarding.resolve_group_challenge_by_admin(token, approved, chat_id=chat_id)
         logger.info(
@@ -192,11 +198,14 @@ def build_onboarding_router(
             outcome.accepted,
             outcome.state,
         )
-        await callback.answer(outcome.reason, show_alert=not outcome.accepted)
+        _ = await callback.answer(outcome.reason, show_alert=not outcome.accepted)
 
-    @router.callback_query(F.data.startswith("join_verify:"))
+    _ = router.callback_query.register(resolve_group_challenge_as_admin, F.data.startswith("vps_admin_"))
+
     async def reject_legacy_group_verification(callback: CallbackQuery) -> None:
         # Old deployments had a click-to-pass callback. Never let it bypass the new challenge.
-        await callback.answer("旧验证按钮已失效，请等待新的行业黑话验证题目。", show_alert=True)
+        _ = await callback.answer("旧验证按钮已失效，请等待新的入群验证题目。", show_alert=True)
+
+    _ = router.callback_query.register(reject_legacy_group_verification, F.data.startswith("join_verify:"))
 
     return router

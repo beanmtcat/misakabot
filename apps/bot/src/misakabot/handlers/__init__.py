@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from aiogram import Bot, Dispatcher
 
+from ..domain import EMPTY_IDS
 from ..group_reply import GroupReplyService
 from ..llm import GroupReplyClient
 from ..onboarding import OnboardingService
@@ -19,7 +20,7 @@ def build_dispatcher(
     allowed_group_ids: frozenset[int],
     admin_user_ids: frozenset[int],
     audit_web_app_url: str = "",
-    dmit_knowledge_group_ids: frozenset[int] = frozenset(),
+    dmit_knowledge_group_ids: frozenset[int] = EMPTY_IDS,
     group_reply_client: GroupReplyClient | None = None,
     bot_user_id: int | None = None,
     bot_username: str | None = None,

@@ -26,8 +26,10 @@ logger.addHandler(logging.NullHandler())
 
 _DISPLAY_NAME_LIMIT = 20
 _LINK_LIKE_PATTERN = re.compile(
-    r"(?i)(?:https?://|www\.|t\.me/|telegram\.(?:me|dog)/)\S*"
-    r"|\b[\w-]+(?:\.[\w-]+)*\.(?:com|net|org|me|io|cc|top|xyz|vip|cn|co|app|link|site)\b\S*"
+    (
+        r"(?i)(?:https?://|www\.|t\.me/|telegram\.(?:me|dog)/)\S*"
+        r"|\b[\w-]+(?:\.[\w-]+)*\.(?:com|net|org|me|io|cc|top|xyz|vip|cn|co|app|link|site)\b\S*"
+    )
 )
 
 
@@ -51,11 +53,11 @@ def is_active_chat_member(member: ChatMemberUnion) -> bool:
 
 
 class AiogramGateway:
-    _DELETION_LEASE_SECONDS = 120
-    _DELETION_REQUEST_TIMEOUT_SECONDS = 30
-    _ADMIN_CACHE_TTL_SECONDS = 30.0
-    _WEBHOOK_UPDATE_RETENTION_DAYS = 7
-    _ABANDONED_WEBHOOK_LEASE_RETENTION_DAYS = 1
+    _DELETION_LEASE_SECONDS: int = 120
+    _DELETION_REQUEST_TIMEOUT_SECONDS: int = 30
+    _ADMIN_CACHE_TTL_SECONDS: float = 30.0
+    _WEBHOOK_UPDATE_RETENTION_DAYS: int = 7
+    _ABANDONED_WEBHOOK_LEASE_RETENTION_DAYS: int = 1
     _MEMBER_LOOKUP_RETRY_DELAYS_SECONDS: tuple[float, ...] = (0.25, 0.75, 1.5)
 
     def __init__(
@@ -65,20 +67,20 @@ class AiogramGateway:
         *,
         show_secondary_verification_username: bool = True,
     ) -> None:
-        self.bot = bot
-        self.repository = repository
-        self.show_secondary_verification_username = show_secondary_verification_username
+        self.bot: Bot = bot
+        self.repository: AuditRepository = repository
+        self.show_secondary_verification_username: bool = show_secondary_verification_username
         self._background_tasks: set[asyncio.Task[None]] = set()
         self._admin_cache: dict[tuple[int, int], tuple[bool, float]] = {}
 
     async def delete_message(self, chat_id: int, message_id: int) -> None:
-        await self.bot.delete_message(chat_id, message_id)
+        _ = await self.bot.delete_message(chat_id, message_id)
 
     async def restrict_member(self, chat_id: int, user_id: int, minutes: int) -> None:
         from datetime import datetime, timedelta, timezone
         from aiogram.types import ChatPermissions
 
-        await self.bot.restrict_chat_member(
+        _ = await self.bot.restrict_chat_member(
             chat_id,
             user_id,
             permissions=ChatPermissions(can_send_messages=False),
@@ -95,7 +97,7 @@ class AiogramGateway:
             _ = await self.bot.ban_chat_member(chat_id, user_id)
 
     async def unban_member(self, chat_id: int, user_id: int) -> None:
-        await self.bot.unban_chat_member(chat_id, user_id, only_if_banned=True)
+        _ = await self.bot.unban_chat_member(chat_id, user_id, only_if_banned=True)
 
     async def is_group_administrator(self, chat_id: int, user_id: int) -> bool:
         key = (chat_id, user_id)
@@ -110,7 +112,7 @@ class AiogramGateway:
 
     def invalidate_group_administrator_cache(self, chat_id: int, user_id: int) -> None:
         """Make group-role changes effective on the next authorization check."""
-        self._admin_cache.pop((chat_id, user_id), None)
+        _ = self._admin_cache.pop((chat_id, user_id), None)
 
     async def is_group_member(self, chat_id: int, user_id: int) -> bool:
         member = await self._get_chat_member(chat_id, user_id)
@@ -231,7 +233,7 @@ class AiogramGateway:
 
     async def _delete_message_after(self, chat_id: int, message_id: int, seconds: int) -> None:
         await asyncio.sleep(seconds)
-        await self._delete_scheduled_message(chat_id, message_id)
+        _ = await self._delete_scheduled_message(chat_id, message_id)
 
     def _schedule_message_deletion(self, chat_id: int, message_id: int, seconds: int) -> None:
         """Persist a deletion before scheduling its in-process fast path."""
@@ -250,7 +252,7 @@ class AiogramGateway:
     async def process_scheduled_message_deletions(self) -> None:
         due = self.repository.due_message_deletions(datetime.now(timezone.utc).isoformat())
         for chat_id, message_id in due:
-            await self._delete_scheduled_message(chat_id, message_id)
+            _ = await self._delete_scheduled_message(chat_id, message_id)
         now = datetime.now(timezone.utc)
         removed = self.repository.prune_webhook_updates(
             (now - timedelta(days=self._WEBHOOK_UPDATE_RETENTION_DAYS)).isoformat(),
@@ -262,7 +264,7 @@ class AiogramGateway:
     async def send_private_audit_link(self, user_id: int, audit_url: str) -> None:
         from aiogram.types import WebAppInfo
 
-        await self.bot.send_message(
+        _ = await self.bot.send_message(
             user_id,
             "点击下方按钮查看该群的审计日志：",
             reply_markup=InlineKeyboardMarkup(
@@ -278,7 +280,7 @@ class AiogramGateway:
     async def send_moderation_notice(self, chat_id: int, user_id: int) -> None:
         # Never include a display name, @username, message body, or model reason here.
         # Those fields may themselves be advertising or hostile text.
-        await self.bot.send_message(
+        _ = await self.bot.send_message(
             chat_id,
             "已移除一名违规账号（广告推广）。请勿发送商品、服务或私聊引流信息。",
             reply_markup=InlineKeyboardMarkup(
@@ -324,7 +326,7 @@ class AiogramGateway:
                     InlineKeyboardButton(text="查看用户信息", callback_data=f"user_info:{user_id}")
                 ]]
             )
-        await self.bot.edit_message_text(
+        _ = await self.bot.edit_message_text(
             chat_id=chat_id, message_id=review_message_id, text=text, reply_markup=markup
         )
 
@@ -334,7 +336,7 @@ class AiogramGateway:
     async def release_member(self, chat_id: int, user_id: int) -> None:
         from aiogram.types import ChatPermissions
 
-        await self.bot.restrict_chat_member(
+        _ = await self.bot.restrict_chat_member(
             chat_id,
             user_id,
             permissions=ChatPermissions(
@@ -356,10 +358,10 @@ class AiogramGateway:
         )
 
     async def approve_join_request(self, chat_id: int, user_id: int) -> None:
-        await self.bot.approve_chat_join_request(chat_id, user_id)
+        _ = await self.bot.approve_chat_join_request(chat_id, user_id)
 
     async def decline_join_request(self, chat_id: int, user_id: int) -> None:
-        await self.bot.decline_chat_join_request(chat_id, user_id)
+        _ = await self.bot.decline_chat_join_request(chat_id, user_id)
 
     async def send_join_verification(
         self, user_chat_id: int, verification_url: str, group_title: str | None
@@ -367,7 +369,7 @@ class AiogramGateway:
         from aiogram.types import WebAppInfo
 
         display_title = (group_title or "目标群组").strip()[:80] or "目标群组"
-        await self.bot.send_message(
+        _ = await self.bot.send_message(
             user_chat_id,
             (
                 f"你正在申请加入「{display_title}」。\n\n"
@@ -384,7 +386,7 @@ class AiogramGateway:
     ) -> None:
         for admin_user_id in admin_user_ids:
             try:
-                await self.bot.send_message(admin_user_id, text)
+                _ = await self.bot.send_message(admin_user_id, text)
             except (TelegramBadRequest, TelegramForbiddenError):
                 logger.warning(
                     "join_guard.admin_notice_unavailable admin_user_id=%s",
@@ -409,7 +411,8 @@ class AiogramGateway:
 
     async def send_manual_join_welcome(self, chat_id: int, user_id: int) -> None:
         # Do not include the member's name: it can itself contain advertising content.
-        await self.bot.send_message(chat_id, OnboardingService.MANUAL_JOIN_WELCOME_TEXT)
+        _ = user_id
+        _ = await self.bot.send_message(chat_id, OnboardingService.MANUAL_JOIN_WELCOME_TEXT)
 
     async def _group_challenge_member_label(
         self, chat_id: int, user_id: int, username: str | None, display_name: str | None
@@ -468,7 +471,7 @@ class AiogramGateway:
             if expires_at else f"{ttl_minutes} 分钟内未完成将移出群组。"
         )
         return (
-            f"新成员 {member_label} 请完成行业黑话二次验证：\n"
+            f"新成员 {member_label} 请完成入群二次验证：\n"
             f"{html.escape(prompt)}\n\n"
             f"请选择正确答案。仅该成员可作答；三次答错将移出群组。{deadline}"
         )
@@ -552,7 +555,7 @@ class AiogramGateway:
                 [InlineKeyboardButton(text="关注本群频道", url=welcome_channel_url)],
                 *keyboard_rows,
             ]
-        await self.bot.edit_message_text(
+        _ = await self.bot.edit_message_text(
             chat_id=chat_id,
             message_id=message_id,
             text=text,

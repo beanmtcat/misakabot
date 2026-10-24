@@ -1,16 +1,17 @@
-from __future__ import annotations
+"""Audit routes with eagerly evaluated annotations for locally scoped dependencies."""
 
 import json
 import logging
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from datetime import datetime, timezone
-from typing import Mapping, Protocol
+from typing import Annotated, LiteralString, Protocol
 
 import httpx
 from fastapi import Depends, FastAPI, Header, HTTPException, Query
 from pydantic import BaseModel
 
 from .config import Settings
+from .json_data import json_object
 from .repository import AuditRepository, database_integer
 from .telegram_init_data import InitDataError, TelegramIdentity, verify_init_data
 
@@ -35,15 +36,15 @@ class TelegramAuditModerationGateway:
     """Telegram actions executed by the separately deployed audit-api service."""
 
     def __init__(self, bot_token: str) -> None:
-        self.bot_token = bot_token
+        self.bot_token: str = bot_token
 
     async def _call(self, method: str, payload: dict[str, object]) -> None:
         async with httpx.AsyncClient(timeout=10.0) as client:
             response = await client.post(
                 f"https://api.telegram.org/bot{self.bot_token}/{method}", json=payload
             )
-            response.raise_for_status()
-        result = response.json()
+            _ = response.raise_for_status()
+        result = json_object(response.content)
         if result.get("ok") is not True:
             raise RuntimeError(f"Telegram {method} rejected: {result.get('description', 'unknown error')}")
 
@@ -90,8 +91,8 @@ def create_app(
     gateway = moderation_gateway or TelegramAuditModerationGateway(settings.telegram_bot_token)
 
     async def require_scoped_admin(
-        chat_id: int = Query(...),
-        init_data: str = Header(alias="X-Telegram-Init-Data"),
+        chat_id: Annotated[int, Query()],
+        init_data: Annotated[str, Header(alias="X-Telegram-Init-Data")],
     ) -> TelegramIdentity:
         try:
             identity = verify_init_data(init_data, settings.telegram_bot_token)
@@ -107,14 +108,14 @@ def create_app(
             raise HTTPException(status_code=403, detail="Telegram user is not an administrator")
         return identity
 
-    @app.get("/healthz")
     def healthcheck() -> dict[str, str]:
         return {"status": "ok"}
 
-    @app.get("/v1/audit/summary")
+    _ = app.get("/healthz")(healthcheck)
+
     def summary(
-        chat_id: int = Query(...),
-        _: TelegramIdentity = Depends(require_scoped_admin),
+        chat_id: Annotated[int, Query()],
+        _admin: Annotated[TelegramIdentity, Depends(require_scoped_admin)],
     ) -> dict[str, int]:
         rows = repository.query_all(
             "SELECT action, COUNT(*) AS count FROM moderation_events WHERE chat_id = %s GROUP BY action",
@@ -128,17 +129,18 @@ def create_app(
             "total": sum(counts.values()),
         }
 
-    @app.get("/v1/audit/events")
+    _ = app.get("/v1/audit/summary")(summary)
+
     def list_events(
-        chat_id: int = Query(...),
+        chat_id: Annotated[int, Query()],
+        _admin: Annotated[TelegramIdentity, Depends(require_scoped_admin)],
         status: str | None = None,
-        action_filter: str | None = Query(default=None, alias="filter"),
-        query: str | None = Query(default=None, max_length=100),
-        before_id: int | None = Query(default=None, gt=0),
-        limit: int = Query(default=30, ge=1, le=100),
-        _: TelegramIdentity = Depends(require_scoped_admin),
+        action_filter: Annotated[str | None, Query(alias="filter")] = None,
+        query: Annotated[str | None, Query(max_length=100)] = None,
+        before_id: Annotated[int | None, Query(gt=0)] = None,
+        limit: Annotated[int, Query(ge=1, le=100)] = 30,
     ) -> dict[str, object]:
-        clauses = ["chat_id = %s"]
+        clauses: list[LiteralString] = ["chat_id = %s"]
         parameters: list[object] = [chat_id]
         if before_id is not None:
             clauses.append("id < %s")
@@ -181,11 +183,12 @@ def create_app(
             "next_before_id": page[-1]["id"] if has_more and page else None,
         }
 
-    @app.get("/v1/audit/events/{event_id}")
+    _ = app.get("/v1/audit/events")(list_events)
+
     def get_event(
         event_id: int,
-        chat_id: int = Query(...),
-        _: TelegramIdentity = Depends(require_scoped_admin),
+        chat_id: Annotated[int, Query()],
+        _admin: Annotated[TelegramIdentity, Depends(require_scoped_admin)],
     ) -> dict[str, object]:
         row = repository.query_one(
             "SELECT * FROM moderation_events WHERE id = %s AND chat_id = %s",
@@ -195,12 +198,13 @@ def create_app(
             raise HTTPException(status_code=404, detail="Audit event not found")
         return _serialize_event(row)
 
-    @app.post("/v1/audit/events/{event_id}/confirm-ban")
+    _ = app.get("/v1/audit/events/{event_id}")(get_event)
+
     async def confirm_ban(
         event_id: int,
-        _: ReviewAction,
-        chat_id: int = Query(...),
-        admin: TelegramIdentity = Depends(require_scoped_admin),
+        _body: ReviewAction,
+        chat_id: Annotated[int, Query()],
+        admin: Annotated[TelegramIdentity, Depends(require_scoped_admin)],
     ) -> dict[str, object]:
         event = _get_event_target(repository, event_id, chat_id)
         try:
@@ -213,12 +217,13 @@ def create_app(
         )
         return _update_review(repository, event_id, chat_id, "confirmed", "permanent_ban", admin)
 
-    @app.post("/v1/audit/events/{event_id}/restore")
+    _ = app.post("/v1/audit/events/{event_id}/confirm-ban")(confirm_ban)
+
     async def restore(
         event_id: int,
-        _: ReviewAction,
-        chat_id: int = Query(...),
-        admin: TelegramIdentity = Depends(require_scoped_admin),
+        _body: ReviewAction,
+        chat_id: Annotated[int, Query()],
+        admin: Annotated[TelegramIdentity, Depends(require_scoped_admin)],
     ) -> dict[str, object]:
         event = _get_event_target(repository, event_id, chat_id)
         try:
@@ -226,8 +231,10 @@ def create_app(
         except Exception as error:
             logger.exception("audit_api.restore_telegram_failed event_id=%s", event_id)
             raise HTTPException(status_code=502, detail="Telegram 恢复权限失败，审计记录未更新") from error
-        repository.unblock_user(event["user_id"])
+        _ = repository.unblock_user(event["user_id"])
         return _update_review(repository, event_id, chat_id, "false_positive", "release", admin)
+
+    _ = app.post("/v1/audit/events/{event_id}/restore")(restore)
 
     return app
 
@@ -242,9 +249,10 @@ def _build_group_admin_checker(settings: Settings) -> GroupAdminChecker:
                     f"https://api.telegram.org/bot{settings.telegram_bot_token}/getChatMember",
                     params={"chat_id": chat_id, "user_id": user_id},
                 )
-                response.raise_for_status()
-                result = response.json()
-                status = result.get("result", {}).get("status")
+                _ = response.raise_for_status()
+                result = json_object(response.content)
+                member = result.get("result")
+                status = member.get("status") if isinstance(member, dict) else None
                 return result.get("ok") is True and status in {"creator", "owner", "administrator"}
             except (httpx.HTTPError, ValueError, TypeError):
                 logger.warning(
@@ -263,7 +271,7 @@ def _serialize_event(row: Mapping[str, object]) -> dict[str, object]:
             event[key.removesuffix("_json")] = json.loads(value) if isinstance(value, str) else value
         else:
             event[key.removesuffix("_json")] = None
-            event.pop(key)
+            _ = event.pop(key)
     return event
 
 

@@ -15,6 +15,7 @@ class GlossaryQuestionTests(unittest.TestCase):
         )
         for question in GLOSSARY_QUESTIONS:
             with self.subTest(prompt=question.prompt):
+                self.assertNotIn("黑话", question.prompt)
                 self.assertEqual(len(question.options), 4)
                 self.assertEqual(len(set(question.options)), 4)
                 self.assertEqual(question.options.count(question.correct_option), 1)

@@ -9,10 +9,14 @@ from misakabot.telegram_init_data import InitDataError, verify_init_data
 
 
 def signed_init_data(token: str, user_id: int) -> str:
+    return signed_user_data(token, {"id": user_id, "username": "admin"})
+
+
+def signed_user_data(token: str, user: object) -> str:
     values = {
         "auth_date": str(int(time.time())),
         "query_id": "test-query",
-        "user": json.dumps({"id": user_id, "username": "admin"}, separators=(",", ":")),
+        "user": json.dumps(user, separators=(",", ":")),
     }
     data_check_string = "\n".join(f"{key}={value}" for key, value in sorted(values.items()))
     secret_key = hmac.new(b"WebAppData", token.encode(), hashlib.sha256).digest()
@@ -21,6 +25,16 @@ def signed_init_data(token: str, user_id: int) -> str:
 
 
 class TelegramInitDataTests(unittest.TestCase):
+    def test_accepts_user_without_a_username(self) -> None:
+        identity = verify_init_data(signed_user_data("123:token", {"id": 55}), "123:token")
+        self.assertEqual(identity.user_id, 55)
+        self.assertIsNone(identity.username)
+
+    def test_rejects_invalid_user_shape_or_boolean_id(self) -> None:
+        for user in ([], None, {"id": True}, {"username": "admin"}, {"id": 55, "username": []}):
+            with self.subTest(user=user), self.assertRaises(InitDataError):
+                verify_init_data(signed_user_data("123:token", user), "123:token")
+
     def test_accepts_valid_signed_data(self) -> None:
         identity = verify_init_data(signed_init_data("123:token", 55), "123:token")
         self.assertEqual(identity.user_id, 55)

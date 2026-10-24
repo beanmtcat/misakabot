@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import logging
 from contextlib import suppress
+from typing import Protocol
 
 import uvicorn
 from aiogram import Bot
@@ -26,6 +27,17 @@ from .repository import PostgresAuditRepository
 from .service import ModerationService
 from .webhook import build_webhook_app
 from .workers import verification_expiry_worker
+
+
+class _PollingDispatcher(Protocol):
+    """The polling API we use, independent of aiogram's untyped UNSET default."""
+
+    async def start_polling(self, *bots: Bot) -> None: ...
+
+
+async def _start_polling(dispatcher: _PollingDispatcher, bot: Bot) -> None:
+    await dispatcher.start_polling(bot)
+
 
 logger = logging.getLogger(__name__)
 logger.addHandler(logging.NullHandler())
@@ -119,8 +131,8 @@ async def run_bot(settings: Settings) -> None:
         settings.admin_user_ids,
         secondary_verification_ban_hours=settings.secondary_verification_ban_hours,
     )
-    await onboarding.resume_pending_direct_join_challenges(settings.allowed_group_ids)
-    await onboarding.resume_undelivered_group_challenges(settings.allowed_group_ids)
+    _ = await onboarding.resume_pending_direct_join_challenges(settings.allowed_group_ids)
+    _ = await onboarding.resume_undelivered_group_challenges(settings.allowed_group_ids)
     dispatcher = build_dispatcher(
         bot,
         service,
@@ -156,9 +168,9 @@ async def run_bot(settings: Settings) -> None:
         onboarding, gateway, allowed_group_ids=settings.allowed_group_ids
     ))
     try:
-        await dispatcher.start_polling(bot)
+        await _start_polling(dispatcher, bot)
     finally:
-        expiry_task.cancel()
+        _ = expiry_task.cancel()
         with suppress(asyncio.CancelledError):
             await expiry_task
 

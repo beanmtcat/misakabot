@@ -10,7 +10,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from urllib.parse import urlencode
 
-from .domain import DirectJoinInput, JoinRequestInput, JoinVerificationOutcome, OnboardingState
+from .domain import DirectJoinInput, EMPTY_IDS, JoinRequestInput, JoinVerificationOutcome, OnboardingState
 from .join_guard import JoinGuard, JoinGuardDecision, JoinGuardMode, JoinGuardPolicy
 from .join_questions import GLOSSARY_QUESTIONS
 from .repository import AuditRepository
@@ -29,23 +29,23 @@ class PendingJoin:
 class OnboardingService:
     """Automatic join verification plus per-group first-observed-message scrutiny."""
 
-    GROUP_CHALLENGE_PREFIX = "vps_verify:"
-    GROUP_CHALLENGE_ADMIN_APPROVE_PREFIX = "vps_admin_approve:"
-    GROUP_CHALLENGE_ADMIN_REJECT_PREFIX = "vps_admin_reject:"
-    GROUP_CHALLENGE_WELCOME_TEXT = (
+    GROUP_CHALLENGE_PREFIX: str = "vps_verify:"
+    GROUP_CHALLENGE_ADMIN_APPROVE_PREFIX: str = "vps_admin_approve:"
+    GROUP_CHALLENGE_ADMIN_REJECT_PREFIX: str = "vps_admin_reject:"
+    GROUP_CHALLENGE_WELCOME_TEXT: str = (
         "✅ 入群二次验证通过\n\n"
         "欢迎加入群组。请遵守群规；首次发言仍会进行 AI 内容审核。"
     )
-    GROUP_CHALLENGE_FAILURE_TEXT = "❌ 入群二次验证未通过\n\n该用户已被移出群组。"
-    INITIAL_VERIFICATION_TIMEOUT_TEXT = "⌛ 入群申请已超时\n\n该用户未在规定时间内完成安全验证，申请已自动拒绝。"
-    INITIAL_VERIFICATION_FAILURE_TEXT = "❌ 入群申请验证失败\n\n该用户未通过安全验证，申请已自动拒绝。"
-    STALE_INITIAL_VERIFICATION_TEXT = "此验证会话已失效，请在 Telegram 私聊中点击最新的“开始安全验证”按钮。"
+    GROUP_CHALLENGE_FAILURE_TEXT: str = "❌ 入群二次验证未通过\n\n该用户已被移出群组。"
+    INITIAL_VERIFICATION_TIMEOUT_TEXT: str = "⌛ 入群申请已超时\n\n该用户未在规定时间内完成安全验证，申请已自动拒绝。"
+    INITIAL_VERIFICATION_FAILURE_TEXT: str = "❌ 入群申请验证失败\n\n该用户未通过安全验证，申请已自动拒绝。"
+    STALE_INITIAL_VERIFICATION_TEXT: str = "此验证会话已失效，请在 Telegram 私聊中点击最新的“开始安全验证”按钮。"
     # Retry window for second-stage prompts Telegram never accepted (bot lost
     # permissions, member already left, ...). Afterwards the normal timeout applies.
-    UNDELIVERED_CHALLENGE_GRACE_MINUTES = 30
-    MANUAL_JOIN_WELCOME_TEXT = (
+    UNDELIVERED_CHALLENGE_GRACE_MINUTES: int = 30
+    MANUAL_JOIN_WELCOME_TEXT: str = (
         "✅ 管理员已批准入群申请\n\n"
-        "欢迎加入群组。请完成下方行业黑话二次验证；完成前暂不能发言。"
+        "欢迎加入群组。请完成下方二次验证；完成前暂不能发言。"
     )
 
     @staticmethod
@@ -105,18 +105,18 @@ class OnboardingService:
         secondary_verification_ttl_minutes: int = 2,
         welcome_channel_url_by_group: Mapping[int, str] | None = None,
         join_guard_policy: JoinGuardPolicy | None = None,
-        admin_user_ids: frozenset[int] = frozenset(),
+        admin_user_ids: frozenset[int] = EMPTY_IDS,
         secondary_verification_ban_hours: int = 1,
     ) -> None:
-        self.repository = repository
-        self.gateway = gateway
-        self.verification_ttl_minutes = verification_ttl_minutes
-        self.secondary_verification_ttl_minutes = secondary_verification_ttl_minutes
-        self.secondary_verification_ban_hours = secondary_verification_ban_hours
-        self.join_verify_url = join_verify_url.rstrip("/") + "/" if join_verify_url else ""
-        self.welcome_channel_url_by_group = dict(welcome_channel_url_by_group or {})
-        self.join_guard = JoinGuard(repository, join_guard_policy or JoinGuardPolicy())
-        self.admin_user_ids = admin_user_ids
+        self.repository: AuditRepository = repository
+        self.gateway: TelegramGateway = gateway
+        self.verification_ttl_minutes: int = verification_ttl_minutes
+        self.secondary_verification_ttl_minutes: int = secondary_verification_ttl_minutes
+        self.secondary_verification_ban_hours: int = secondary_verification_ban_hours
+        self.join_verify_url: str = join_verify_url.rstrip("/") + "/" if join_verify_url else ""
+        self.welcome_channel_url_by_group: dict[int, str] = dict(welcome_channel_url_by_group or {})
+        self.join_guard: JoinGuard = JoinGuard(repository, join_guard_policy or JoinGuardPolicy())
+        self.admin_user_ids: frozenset[int] = admin_user_ids
 
     @property
     def verification_ban_summary(self) -> str:
@@ -157,8 +157,10 @@ class OnboardingService:
                     error,
                 )
             logger.warning(
-                "join_guard.request_rejected chat_id=%s user_id=%s mode=%s reason=%s "
-                "one_minute=%s five_minutes=%s",
+                (
+                    "join_guard.request_rejected chat_id=%s user_id=%s mode=%s reason=%s "
+                    "one_minute=%s five_minutes=%s"
+                ),
                 request.chat_id,
                 request.user_id,
                 guard.mode,
@@ -335,7 +337,7 @@ class OnboardingService:
             if chat_id not in allowed_group_ids:
                 continue
             try:
-                await self._start_group_challenge(
+                _ = await self._start_group_challenge(
                     chat_id=chat_id,
                     user_id=user_id,
                     username=username,
@@ -430,7 +432,7 @@ class OnboardingService:
             self.secondary_verification_ttl_minutes, display_name=display_name,
         )
         delivered_at = datetime.now(timezone.utc)
-        self.repository.set_group_challenge_message_id(
+        _ = self.repository.set_group_challenge_message_id(
             chat_id,
             user_id,
             message_id,
@@ -461,7 +463,7 @@ class OnboardingService:
             elif verification_flow == "direct_join":
                 # Legacy callbacks cannot complete the post-join challenge.
                 return JoinVerificationOutcome(
-                    False, OnboardingState.SECONDARY_VERIFICATION_PENDING, "请完成群内行业黑话验证"
+                    False, OnboardingState.SECONDARY_VERIFICATION_PENDING, "请完成群内二次验证"
                 )
             else:
                 raise ValueError(f"unknown verification flow: {verification_flow}")
@@ -487,7 +489,7 @@ class OnboardingService:
                     "自动放行失败，请重新申请入群",
                 )
         try:
-            await self._start_group_challenge(
+            _ = await self._start_group_challenge(
                 chat_id=chat_id,
                 user_id=user_id,
                 username=self.repository.onboarding_username(chat_id, user_id),
@@ -504,7 +506,7 @@ class OnboardingService:
         return JoinVerificationOutcome(
             True,
             OnboardingState.SECONDARY_VERIFICATION_PENDING,
-            "第一阶段验证通过。请在群内完成行业黑话验证。",
+            "第一阶段验证通过。请在群内完成二次验证。",
         )
 
     def has_current_initial_verification(self, token: str, telegram_user_id: int) -> bool:
@@ -525,7 +527,7 @@ class OnboardingService:
             await self.gateway.decline_join_request(chat_id, user_id)
         except Exception as error:
             if self._is_terminal_expiry_error(error):
-                self.repository.mark_initial_verification_failed(chat_id, user_id, now)
+                _ = self.repository.mark_initial_verification_failed(chat_id, user_id, now)
                 await self._send_initial_verification_result(
                     chat_id, user_id, self.INITIAL_VERIFICATION_FAILURE_TEXT
                 )
@@ -773,8 +775,10 @@ class OnboardingService:
             # message was removed by another moderator.
             if "message to edit not found" in str(error).lower():
                 logger.info(
-                    "onboarding.group_challenge_message_already_removed "
-                    "chat_id=%s message_id=%s",
+                    (
+                        "onboarding.group_challenge_message_already_removed "
+                        "chat_id=%s message_id=%s"
+                    ),
                     chat_id,
                     message_id,
                 )
@@ -798,7 +802,7 @@ class OnboardingService:
         This deliberately works for existing members as well as members that joined after
         the Bot. The onboarding state update remains best-effort bookkeeping only.
         """
-        self.mark_first_message(chat_id, user_id, timestamp)
+        _ = self.mark_first_message(chat_id, user_id, timestamp)
         first_observed = self.repository.mark_first_observed_message(
             chat_id, user_id, timestamp.isoformat()
         )
@@ -848,8 +852,10 @@ class OnboardingService:
                     # Membership is genuinely unknown. Never turn a failed read into a
                     # destructive decline: leave the row pending for the next cycle.
                     logger.warning(
-                        "onboarding.expiry_member_status_lookup_deferred "
-                        "chat_id=%s user_id=%s reason=%s",
+                        (
+                            "onboarding.expiry_member_status_lookup_deferred "
+                            "chat_id=%s user_id=%s reason=%s"
+                        ),
                         chat_id,
                         user_id,
                         error,
@@ -862,7 +868,7 @@ class OnboardingService:
                 if self.repository.mark_join_request_manually_approved(chat_id, user_id, timestamp):
                     await self._send_manual_join_welcome(chat_id, user_id)
                     try:
-                        await self._start_group_challenge(
+                        _ = await self._start_group_challenge(
                             chat_id=chat_id,
                             user_id=user_id,
                             username=None,

@@ -76,11 +76,14 @@ def _is_sensitive_memory(content: str) -> bool:
     """Never persist obvious credentials even if a member asks the Bot to remember them."""
     return bool(
         re.search(
-            r"(?i)(?:password|passwd|token|api[ _-]?key|private[ _-]?key|secret|"
-            r"密码|口令|私钥|密钥|订阅链接|分享链接)",
+            (
+                r"(?i)(?:password|passwd|token|api[ _-]?key|private[ _-]?key|secret|"
+                r"密码|口令|私钥|密钥|订阅链接|分享链接)"
+            ),
             content,
         )
     )
+
 
 class GroupReplyService:
     """Explicitly addressed group conversations and opt-in memory controls."""
@@ -95,13 +98,13 @@ class GroupReplyService:
         knowledge_group_ids: frozenset[int],
         is_authorized_admin: AdminChecker | None = None,
     ) -> None:
-        self.bot = bot
-        self.repository = repository
-        self.client = client
-        self.bot_user_id = bot_user_id
-        self.bot_username = bot_username
-        self.knowledge_group_ids = knowledge_group_ids
-        self.is_authorized_admin = is_authorized_admin
+        self.bot: Bot = bot
+        self.repository: AuditRepository = repository
+        self.client: GroupReplyClient | None = client
+        self.bot_user_id: int | None = bot_user_id
+        self.bot_username: str | None = bot_username
+        self.knowledge_group_ids: frozenset[int] = knowledge_group_ids
+        self.is_authorized_admin: AdminChecker | None = is_authorized_admin
 
     async def handle_memory_request(
         self, message: Message, action: str, content: str | None = None
@@ -119,18 +122,20 @@ class GroupReplyService:
         now = datetime.now(timezone.utc).isoformat()
         if action == "enable":
             repository.set_assistant_memory_enabled(chat_id, user_id, True, now)
-            await message.reply("已开启长期记忆。发送“记住：内容”可保存偏好；/memory off 可关闭。")
+            _ = await message.reply("已开启长期记忆。发送“记住：内容”可保存偏好；/memory off 可关闭。")
         elif action == "disable":
             repository.set_assistant_memory_enabled(chat_id, user_id, False, now)
-            await message.reply("已关闭长期记忆；已有记忆不会用于后续回答。/memory clear 可删除。")
+            _ = await message.reply("已关闭长期记忆；已有记忆不会用于后续回答。/memory clear 可删除。")
         elif action == "clear":
             deleted = repository.clear_assistant_memories(chat_id, user_id)
-            await message.reply(f"已删除 {deleted} 条长期记忆。")
+            _ = await message.reply(f"已删除 {deleted} 条长期记忆。")
         elif action == "help":
             state = "开启" if repository.assistant_memory_enabled(chat_id, user_id) else "关闭"
-            await message.reply(
-                f"本群长期记忆当前：{state}。用法：/memory on、/memory off、/memory clear；"
-                "@我后发送“记住：内容”可保存一条。"
+            _ = await message.reply(
+                (
+                    f"本群长期记忆当前：{state}。用法：/memory on、/memory off、/memory clear；"
+                    "@我后发送“记住：内容”可保存一条。"
+                )
             )
         elif action == "remember" and content:
             if not repository.assistant_memory_enabled(chat_id, user_id):
@@ -138,12 +143,12 @@ class GroupReplyService:
                 # would just invite command spam.
                 checker = self.is_authorized_admin
                 if checker is not None and await checker(chat_id, user_id):
-                    await message.reply("长期记忆当前关闭。请先发送 /memory on。")
+                    _ = await message.reply("长期记忆当前关闭。请先发送 /memory on。")
             elif _is_sensitive_memory(content):
-                await message.reply("为保护安全，我不会保存密码、密钥、Token 或订阅链接。")
+                _ = await message.reply("为保护安全，我不会保存密码、密钥、Token 或订阅链接。")
             else:
                 repository.remember_assistant_fact(chat_id, user_id, content, now)
-                await message.reply("记住了，仅用于本群后续与我的对话。")
+                _ = await message.reply("记住了，仅用于本群后续与我的对话。")
 
     def addressed_memory_action(self, message: Message) -> str | None:
         """Identify controls before moderation or model calls can create side effects."""
@@ -179,7 +184,7 @@ class GroupReplyService:
             return
         user_message = _reply_prompt_text(_message_text(message), bot_username)
         if not user_message:
-            await message.reply("想问什么？请在 @Bot 后补充具体问题。")
+            _ = await message.reply("想问什么？请在 @Bot 后补充具体问题。")
             return
         memory_request = _memory_request(user_message)
         if memory_request is not None:
@@ -210,13 +215,13 @@ class GroupReplyService:
                 message.message_id,
                 message.from_user.id,
             )
-            await message.reply("抱歉，暂时无法回复，请稍后再试。")
+            _ = await message.reply("抱歉，暂时无法回复，请稍后再试。")
             return
         finally:
-            thinking_task.cancel()
+            _ = thinking_task.cancel()
             with suppress(asyncio.CancelledError):
                 await thinking_task
-        await message.reply(answer)
+        _ = await message.reply(answer)
         try:
             now = datetime.now(timezone.utc).isoformat()
             repository.record_assistant_message(message.chat.id, message.from_user.id, "user", user_message, now)

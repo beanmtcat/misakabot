@@ -6,18 +6,24 @@ from .domain import NormalizedMessage, SuspicionSignals
 
 SALE_RE = re.compile(r"(?:出售|出|一手|批发|低价|接单|联系|私聊|私我|私信我|顶我|代理|优惠|自取)")
 DEVICE_PREORDER_RE = re.compile(
-    r"(?:(?:苹果|iphone|华为|小米|三星|ipad|macbook|ps[345]|switch).{0,12}"
-    r"(?:预订|预定|订购|现货|到货|低价|出售|批发|[一二三四五六七八九十\d]+折)"
-    r"|(?:预订|预定|订购|现货|到货|低价|出售|批发|[一二三四五六七八九十\d]+折).{0,12}"
-    r"(?:苹果|iphone|华为|小米|三星|ipad|macbook|ps[345]|switch))"
+    (
+        r"(?:(?:苹果|iphone|华为|小米|三星|ipad|macbook|ps[345]|switch).{0,12}"
+        r"(?:预订|预定|订购|现货|到货|低价|出售|批发|[一二三四五六七八九十\d]+折)"
+        r"|(?:预订|预定|订购|现货|到货|低价|出售|批发|[一二三四五六七八九十\d]+折).{0,12}"
+        r"(?:苹果|iphone|华为|小米|三星|ipad|macbook|ps[345]|switch))"
+    )
 )
 PROFILE_SERVICE_PROMOTION_RE = re.compile(
-    r"(?:拍照|摄影|约拍|代拍|修图|跟拍|写真|证件照).{0,16}"
-    r"(?:寻我(?:简介)?|看我(?:简介)?|详情看简介|联系|私聊|加我|接单|预约|报价)"
+    (
+        r"(?:拍照|摄影|约拍|代拍|修图|跟拍|写真|证件照).{0,16}"
+        r"(?:寻我(?:简介)?|看我(?:简介)?|详情看简介|联系|私聊|加我|接单|预约|报价)"
+    )
 )
 COMPENSATION_RE = re.compile(
-    r"(?:日结|周结|月结|[一二三四五六七八九十百千万两\d]+(?:元|rmb|块)(?:/|每)?(?:天|日|小时|h)|"
-    r"(?:一天|每日|每天|每小时)\s*[一二三四五六七八九十百千万两\d]+\s*(?:元|rmb|块))"
+    (
+        r"(?:日结|周结|月结|[一二三四五六七八九十百千万两\d]+(?:元|rmb|块)(?:/|每)?(?:天|日|小时|h)|"
+        r"(?:一天|每日|每天|每小时)\s*[一二三四五六七八九十百千万两\d]+\s*(?:元|rmb|块))"
+    )
 )
 RECRUITMENT_RE = re.compile(r"(?:兼职|招聘|招人|招募|上班|工作机会|小时工|岗位|副业|宝妈岗)")
 HIGH_PAY_RE = re.compile(
@@ -28,17 +34,21 @@ RECRUITMENT_LURE_RE = re.compile(
 )
 REWARD_GUARANTEE_RE = re.compile(r"(?:包提|保提).{0,12}(?:小米|su[\s-]?7|汽车|苹果)")
 TRANSACTION_CONTEXT_RE = re.compile(
-    r"(?:出售|卖|出|收个?|求购|求收|转让|出租).{0,32}(?:vps|小鸡|服务器|主机|订阅|基础配置|pro|as[0-9])"
-    r"|(?:vps|小鸡|服务器|主机|订阅|基础配置|pro|as[0-9]).{0,32}"
-    r"(?:出售|卖|出|收个?|求购|求收|转让|出租)"
+    (
+        r"(?:出售|卖|出|收个?|求购|求收|转让|出租).{0,32}(?:vps|小鸡|服务器|主机|订阅|基础配置|pro|as[0-9])"
+        r"|(?:vps|小鸡|服务器|主机|订阅|基础配置|pro|as[0-9]).{0,32}"
+        r"(?:出售|卖|出|收个?|求购|求收|转让|出租)"
+    )
 )
 # These patterns only select messages for semantic review.  They do not decide
 # whether a message is an advertisement: that distinction belongs to the model.
 PAYMENT_SERVICE_CONTEXT_RE = re.compile(
-    r"(?:搞定|代付|代充|代开|开通|充值|付款|支付|付费|渠道|接单).{0,32}"
-    r"(?:gpt|chatgpt|claude|kiro|订阅|会员|账号|服务|软件|任何|全网)"
-    r"|(?:gpt|chatgpt|claude|kiro|订阅|会员|账号|服务|软件).{0,32}"
-    r"(?:搞定|代付|代充|代开|开通|充值|付款|支付|付费|渠道|接单)"
+    (
+        r"(?:搞定|代付|代充|代开|开通|充值|付款|支付|付费|渠道|接单).{0,32}"
+        r"(?:gpt|chatgpt|claude|kiro|订阅|会员|账号|服务|软件|任何|全网)"
+        r"|(?:gpt|chatgpt|claude|kiro|订阅|会员|账号|服务|软件).{0,32}"
+        r"(?:搞定|代付|代充|代开|开通|充值|付款|支付|付费|渠道|接单)"
+    )
 )
 SEMANTIC_REVIEW_REASON = "潜在交易或代办服务：交由语义审核"
 FORCED_FIRST_OBSERVED_REASON = "群内首次可见发言：强制大模型审核"

@@ -2,11 +2,12 @@
 
 from __future__ import annotations
 
-import json
 import re
 from functools import lru_cache
 from importlib.resources import files
 from typing import TypedDict
+
+from .json_data import json_object
 
 
 DMIT_GETTING_STARTED_URL = "https://docs.dmit.io/zh/guide/getting-started"
@@ -22,8 +23,9 @@ class DmitDocument(TypedDict):
 
 def _terms(text: str) -> set[str]:
     """Use short Chinese n-grams plus Latin words for dependency-free retrieval."""
-    terms = {item.casefold() for item in re.findall(r"[a-zA-Z0-9_./-]{2,}", text)}
-    for run in re.findall(r"[\u4e00-\u9fff]{2,}", text):
+    terms = {match.group().casefold() for match in re.finditer(r"[a-zA-Z0-9_./-]{2,}", text)}
+    for match in re.finditer(r"[\u4e00-\u9fff]{2,}", text):
+        run = match.group()
         terms.add(run)
         terms.update(run[index : index + 2] for index in range(len(run) - 1))
     return terms
@@ -33,7 +35,7 @@ def _terms(text: str) -> set[str]:
 def dmit_documents() -> tuple[DmitDocument, ...]:
     """Load the packaged Chinese DMIT Docs snapshot produced by the sync tool."""
     resource = files("misakabot").joinpath(_DMIT_DATA_FILE)
-    payload = json.loads(resource.read_text(encoding="utf-8"))
+    payload = json_object(resource.read_text(encoding="utf-8"))
     documents = payload.get("documents", [])
     if not isinstance(documents, list):
         return ()
@@ -59,11 +61,15 @@ def dmit_knowledge_for_query(query: str, limit: int = 3, chunk_size: int = 1800)
     selected = ranked[:limit]
     if not selected:
         return (
-            f"{_ALIAS_NOTE}\nDMIT 官方中文文档已收录，但未找到与当前问题直接对应的条目。"
-            f"请以官方文档或工单为准：{DMIT_GETTING_STARTED_URL}",
+            (
+                f"{_ALIAS_NOTE}\nDMIT 官方中文文档已收录，但未找到与当前问题直接对应的条目。"
+                f"请以官方文档或工单为准：{DMIT_GETTING_STARTED_URL}"
+            ),
         )
     return tuple(
-        f"{_ALIAS_NOTE}\n[DMIT 官方文档：{document['title']}]\n"
-        f"来源：{document['url']}\n{document['content'][:chunk_size]}"
+        (
+            f"{_ALIAS_NOTE}\n[DMIT 官方文档：{document['title']}]\n"
+            f"来源：{document['url']}\n{document['content'][:chunk_size]}"
+        )
         for _, document in selected
     )

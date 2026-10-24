@@ -8,6 +8,7 @@ from collections.abc import Mapping
 from typing import Protocol
 
 import httpx
+from pydantic import BaseModel, Field, StrictBool
 
 from .domain import ModerationVerdict, NormalizedMessage, SuspicionSignals
 from .signals import FORCED_FIRST_OBSERVED_REASON
@@ -28,6 +29,30 @@ logger.addHandler(logging.NullHandler())
 LLM_RETRY_DELAYS_SECONDS = (0.5, 1.0, 2.0)
 
 
+class _CompletionMessage(BaseModel):
+    content: str
+
+
+class _CompletionChoice(BaseModel):
+    message: _CompletionMessage
+
+
+class _CompletionResponse(BaseModel):
+    choices: list[_CompletionChoice] = Field(min_length=1)
+
+
+class _ModerationResponse(BaseModel):
+    is_ad: StrictBool
+    confidence: float = Field(ge=0, le=1, strict=True)
+    category: str = "other"
+    evidence: list[str] = Field(default_factory=list)
+    reason: str = ""
+
+
+def _reply_content(response: httpx.Response) -> str:
+    return _CompletionResponse.model_validate_json(response.content).choices[0].message.content
+
+
 async def _post_with_retry(
     client: httpx.AsyncClient,
     url: str,
@@ -40,9 +65,9 @@ async def _post_with_retry(
         try:
             response = await client.post(url, headers=headers, json=json_body)
             if response.status_code not in {408, 429} and response.status_code < 500:
-                response.raise_for_status()
+                _ = response.raise_for_status()
                 return response
-            response.raise_for_status()
+            _ = response.raise_for_status()
         except (httpx.TimeoutException, httpx.NetworkError, httpx.HTTPStatusError) as error:
             status_code = error.response.status_code if isinstance(error, httpx.HTTPStatusError) else None
             retryable = status_code is None or status_code in {408, 429} or status_code >= 500
@@ -86,6 +111,7 @@ class RuleBasedModerationClient:
         message: NormalizedMessage,
         signals: SuspicionSignals,
     ) -> ModerationVerdict:
+        _ = message  # This fallback only uses precomputed signals, not a second classifier.
         # The forced-first-message marker means "review everything", not "this is an ad".
         # It must never turn an otherwise normal message into a local-rule auto-ban.
         concrete_reasons = tuple(
@@ -113,9 +139,9 @@ class RuleBasedModerationClient:
 class OpenAICompatibleModerationClient:
     """Calls an OpenAI-compatible JSON endpoint without coupling moderation logic to one vendor."""
 
-    temperature = 0
-    request_timeout_seconds = 15.0
-    total_request_budget_seconds = 45.0
+    temperature: int = 0
+    request_timeout_seconds: float = 15.0
+    total_request_budget_seconds: float = 45.0
 
     def __init__(
         self,
@@ -124,10 +150,10 @@ class OpenAICompatibleModerationClient:
         model: str,
         transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
-        self.base_url = base_url.rstrip("/")
-        self.api_key = api_key
-        self.model = model
-        self.transport = transport
+        self.base_url: str = base_url.rstrip("/")
+        self.api_key: str = api_key
+        self.model: str = model
+        self.transport: httpx.AsyncBaseTransport | None = transport
 
     async def judge(
         self,
@@ -188,18 +214,13 @@ class OpenAICompatibleModerationClient:
                     headers={"Authorization": f"Bearer {self.api_key}"}, json_body=payload,
                 )
         try:
-            content = response.json()["choices"][0]["message"]["content"]
-            parsed = json.loads(content)
-            confidence = float(parsed["confidence"])
-            evidence = tuple(str(item) for item in parsed.get("evidence", []))
-            if not 0 <= confidence <= 1:
-                raise ValueError("confidence outside [0, 1]")
+            parsed = _ModerationResponse.model_validate_json(_reply_content(response))
             verdict = ModerationVerdict(
-                is_ad=bool(parsed["is_ad"]),
-                category=str(parsed.get("category", "other")),
-                confidence=confidence,
-                evidence=evidence,
-                reason=str(parsed.get("reason", "")),
+                is_ad=parsed.is_ad,
+                category=parsed.category,
+                confidence=parsed.confidence,
+                evidence=tuple(parsed.evidence),
+                reason=parsed.reason,
             )
             logger.info(
                 "llm.moderation.response provider=%s model=%s is_ad=%s confidence=%.2f category=%s",
@@ -218,7 +239,7 @@ class KimiCodingModerationClient(OpenAICompatibleModerationClient):
     """Kimi Code endpoint adapter. The actual plan-assigned model stays configurable."""
 
     # Kimi Coding Plan's k3 endpoint currently only accepts temperature=1.
-    temperature = 1
+    temperature: int = 1
 
     def __init__(
         self,
@@ -240,12 +261,12 @@ class KimiCodingGroupReplyClient:
         base_url: str = "https://api.kimi.com/coding/v1",
         transport: httpx.AsyncBaseTransport | None = None,
     ) -> None:
-        self.api_key = api_key
-        self.model = model
-        self.base_url = base_url.rstrip("/")
-        self.transport = transport
-        self.request_timeout_seconds = 15.0
-        self.total_request_budget_seconds = 35.0
+        self.api_key: str = api_key
+        self.model: str = model
+        self.base_url: str = base_url.rstrip("/")
+        self.transport: httpx.AsyncBaseTransport | None = transport
+        self.request_timeout_seconds: float = 15.0
+        self.total_request_budget_seconds: float = 35.0
 
     async def reply(
         self,
@@ -306,10 +327,10 @@ class KimiCodingGroupReplyClient:
                     headers={"Authorization": f"Bearer {self.api_key}"}, json_body=payload,
                 )
         try:
-            content = response.json()["choices"][0]["message"]["content"]
-        except (KeyError, TypeError) as error:
+            content = _reply_content(response)
+        except (KeyError, TypeError, ValueError) as error:
             raise ValueError("LLM response did not include reply content") from error
-        if not isinstance(content, str) or not content.strip():
+        if not content.strip():
             raise ValueError("LLM reply is empty")
         answer = telegram_plain_text(content)[:3000]
         logger.info(

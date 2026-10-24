@@ -148,7 +148,8 @@ class GroupChallengeDisplayTests(unittest.IsolatedAsyncioTestCase):
 
         text = bot.send_message.await_args.args[1]
         self.assertIn("<code>@member_name</code>（ID：42）", text)
-        self.assertIn("行业黑话二次验证", text)
+        self.assertIn("入群二次验证", text)
+        self.assertNotIn("黑话", text)
         self.assertNotIn("交易安全", text)
 
     async def test_challenge_can_hide_username(self) -> None:

@@ -1,11 +1,10 @@
-from __future__ import annotations
-
 import asyncio
 import hmac
 import logging
-from collections.abc import AsyncIterator
+from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager, suppress
 from datetime import datetime, timedelta, timezone
+from typing import Annotated
 
 from aiogram import Bot, Dispatcher
 from aiogram.exceptions import TelegramBadRequest
@@ -56,10 +55,10 @@ def build_webhook_app(
     expiry_task: asyncio.Task[None] | None = None
 
     @asynccontextmanager
-    async def webhook_lifespan(_: FastAPI) -> AsyncIterator[None]:
+    async def webhook_lifespan(_app: FastAPI) -> AsyncGenerator[None]:
         nonlocal expiry_task
         await register_bot_commands(bot, settings.allowed_group_ids)
-        await bot.set_webhook(
+        _ = await bot.set_webhook(
             settings.telegram_webhook_url,
             secret_token=settings.telegram_webhook_secret,
             allowed_updates=dispatcher.resolve_used_update_types(),
@@ -76,7 +75,7 @@ def build_webhook_app(
             yield
         finally:
             if expiry_task is not None:
-                expiry_task.cancel()
+                _ = expiry_task.cancel()
                 with suppress(asyncio.CancelledError):
                     await expiry_task
             await bot.session.close()
@@ -85,10 +84,9 @@ def build_webhook_app(
     # both services on the supported FastAPI lifecycle API without duplicating routes.
     app.router.lifespan_context = webhook_lifespan
 
-    @app.post("/telegram/webhook", include_in_schema=False)
     async def receive_telegram_update(
         request: Request,
-        secret_token: str | None = Header(default=None, alias="X-Telegram-Bot-Api-Secret-Token"),
+        secret_token: Annotated[str | None, Header(alias="X-Telegram-Bot-Api-Secret-Token")] = None,
     ) -> dict[str, bool]:
         if not hmac.compare_digest(secret_token or "", settings.telegram_webhook_secret):
             logger.warning("webhook.rejected invalid_secret")
@@ -148,14 +146,16 @@ def build_webhook_app(
         logger.info("webhook.processed update_id=%s", update.update_id)
         return {"ok": True}
 
+    _ = app.post("/telegram/webhook", include_in_schema=False)(receive_telegram_update)
+
     if onboarding is not None:
-        @app.get("/join-verify/", include_in_schema=False)
         async def show_join_verify_page() -> HTMLResponse:
             if not settings.turnstile_site_key:
                 raise HTTPException(status_code=503, detail="Turnstile is not configured")
             return HTMLResponse(join_verify_page(settings.turnstile_site_key))
 
-        @app.post("/join-verify/api/session-status", include_in_schema=False)
+        _ = app.get("/join-verify/", include_in_schema=False)(show_join_verify_page)
+
         async def check_join_verify_session(submission: JoinVerifySessionCheck) -> dict[str, bool]:
             try:
                 identity = verify_init_data(submission.init_data, settings.telegram_bot_token)
@@ -171,7 +171,8 @@ def build_webhook_app(
                 )
             return {"ok": True}
 
-        @app.post("/join-verify/api/complete", include_in_schema=False)
+        _ = app.post("/join-verify/api/session-status", include_in_schema=False)(check_join_verify_session)
+
         async def complete_join_verify(submission: JoinVerifySubmission, request: Request) -> dict[str, object]:
             try:
                 identity = verify_init_data(submission.init_data, settings.telegram_bot_token)
@@ -189,5 +190,7 @@ def build_webhook_app(
                 raise HTTPException(status_code=409, detail=outcome.reason)
             logger.info("join_verify.completed user_id=%s", identity.user_id)
             return {"ok": True, "message": outcome.reason}
+
+        _ = app.post("/join-verify/api/complete", include_in_schema=False)(complete_join_verify)
 
     return app

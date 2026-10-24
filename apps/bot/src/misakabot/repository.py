@@ -1,14 +1,15 @@
 from __future__ import annotations
 
 import json
-import sqlite3
 from contextlib import closing
 from dataclasses import dataclass
 from datetime import datetime, timedelta
-from importlib import import_module
 from pathlib import Path
-from typing import Any
+from typing import LiteralString
 
+from typing_extensions import override
+
+from .database import DatabaseConnection, PostgresConnection, SqliteConnection
 from .domain import (
     Action,
     JoinRequestInput,
@@ -26,6 +27,18 @@ def database_integer(value: object) -> int:
     if isinstance(value, (int, str)):
         return int(value)
     raise TypeError(f"Expected an integer database field, got {type(value).__name__}")
+
+
+def _optional_text(value: object) -> str | None:
+    if value is None or isinstance(value, str):
+        return value
+    raise TypeError(f"Expected a text database field, got {type(value).__name__}")
+
+
+def _optional_timestamp(value: object) -> str | None:
+    if isinstance(value, datetime):
+        return value.isoformat()
+    return _optional_text(value)
 
 
 @dataclass(frozen=True)
@@ -47,35 +60,16 @@ class ModerationReviewTarget:
     user_id: int
 
 
-class _SqliteConnection:
-    """Accept PostgreSQL-style placeholders while keeping the local backup backend testable."""
-
-    def __init__(self, database_path: str) -> None:
-        self._connection = sqlite3.connect(database_path)
-
-    def execute(self, sql: str, parameters: tuple[object, ...] | list[object] = ()) -> sqlite3.Cursor:
-        return self._connection.execute(sql.replace("%s", "?"), parameters)
-
-    def commit(self) -> None:
-        self._connection.commit()
-
-    def rollback(self) -> None:
-        self._connection.rollback()
-
-    def close(self) -> None:
-        self._connection.close()
-
-
 class AuditRepository:
     def __init__(self, database_path: str | Path) -> None:
-        self.database_path = str(database_path)
+        self.database_path: str = str(database_path)
 
     @property
     def is_postgres(self) -> bool:
         return False
 
-    def _connect(self) -> Any:
-        return _SqliteConnection(self.database_path)
+    def _connect(self) -> DatabaseConnection:
+        return SqliteConnection(self.database_path)
 
     def _json_value(self, value: str) -> object:
         """Return a database-native JSON parameter when the backend supports one."""
@@ -84,7 +78,7 @@ class AuditRepository:
     def initialize(self) -> None:
         Path(self.database_path).parent.mkdir(parents=True, exist_ok=True)
         with closing(self._connect()) as connection:
-            connection.execute(
+            _ = connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS moderation_events (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -105,7 +99,7 @@ class AuditRepository:
                 )
                 """
             )
-            connection.execute(
+            _ = connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS member_onboarding (
                     chat_id INTEGER NOT NULL,
@@ -128,7 +122,7 @@ class AuditRepository:
                 )
                 """
             )
-            connection.execute(
+            _ = connection.execute(
                 """
                 CREATE INDEX IF NOT EXISTS idx_moderation_events_chat_action_id
                 ON moderation_events(chat_id, action, id DESC)
@@ -136,21 +130,21 @@ class AuditRepository:
             )
             moderation_columns = {row[1] for row in connection.execute("PRAGMA table_info(moderation_events)")}
             if "review_message_id" not in moderation_columns:
-                connection.execute("ALTER TABLE moderation_events ADD COLUMN review_message_id INTEGER")
+                _ = connection.execute("ALTER TABLE moderation_events ADD COLUMN review_message_id INTEGER")
             if "reviewed_by_user_id" not in moderation_columns:
-                connection.execute("ALTER TABLE moderation_events ADD COLUMN reviewed_by_user_id INTEGER")
+                _ = connection.execute("ALTER TABLE moderation_events ADD COLUMN reviewed_by_user_id INTEGER")
             if "reviewed_at" not in moderation_columns:
-                connection.execute("ALTER TABLE moderation_events ADD COLUMN reviewed_at TEXT")
+                _ = connection.execute("ALTER TABLE moderation_events ADD COLUMN reviewed_at TEXT")
             columns = {row[1] for row in connection.execute("PRAGMA table_info(member_onboarding)")}
             if "verification_flow" not in columns:
-                connection.execute(
+                _ = connection.execute(
                     "ALTER TABLE member_onboarding ADD COLUMN verification_flow TEXT NOT NULL DEFAULT 'join_request'"
                 )
             if "verification_answer_index" not in columns:
-                connection.execute("ALTER TABLE member_onboarding ADD COLUMN verification_answer_index INTEGER")
+                _ = connection.execute("ALTER TABLE member_onboarding ADD COLUMN verification_answer_index INTEGER")
             if "verification_message_id" not in columns:
-                connection.execute("ALTER TABLE member_onboarding ADD COLUMN verification_message_id INTEGER")
-            connection.execute(
+                _ = connection.execute("ALTER TABLE member_onboarding ADD COLUMN verification_message_id INTEGER")
+            _ = connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS blocked_indicators (
                     indicator_type TEXT NOT NULL,
@@ -161,7 +155,7 @@ class AuditRepository:
                 )
                 """
             )
-            connection.execute(
+            _ = connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS member_first_observations (
                     chat_id INTEGER NOT NULL,
@@ -171,7 +165,7 @@ class AuditRepository:
                 )
                 """
             )
-            connection.execute(
+            _ = connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS join_request_events (
                     chat_id INTEGER NOT NULL,
@@ -187,13 +181,13 @@ class AuditRepository:
                 )
                 """
             )
-            connection.execute(
+            _ = connection.execute(
                 """
                 CREATE INDEX IF NOT EXISTS idx_join_request_events_chat_time
                 ON join_request_events(chat_id, requested_at)
                 """
             )
-            connection.execute(
+            _ = connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS join_guard_state (
                     chat_id INTEGER PRIMARY KEY,
@@ -205,7 +199,7 @@ class AuditRepository:
                 )
                 """
             )
-            connection.execute(
+            _ = connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS assistant_sessions (
                     chat_id INTEGER NOT NULL,
@@ -216,7 +210,7 @@ class AuditRepository:
                 )
                 """
             )
-            connection.execute(
+            _ = connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS assistant_messages (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -228,13 +222,13 @@ class AuditRepository:
                 )
                 """
             )
-            connection.execute(
+            _ = connection.execute(
                 """
                 CREATE INDEX IF NOT EXISTS idx_assistant_messages_context
                 ON assistant_messages(chat_id, user_id, id DESC)
                 """
             )
-            connection.execute(
+            _ = connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS assistant_memory_preferences (
                     chat_id INTEGER NOT NULL,
@@ -245,7 +239,7 @@ class AuditRepository:
                 )
                 """
             )
-            connection.execute(
+            _ = connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS assistant_user_memories (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -258,7 +252,7 @@ class AuditRepository:
                 )
                 """
             )
-            connection.execute(
+            _ = connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS webhook_updates (
                     update_id INTEGER PRIMARY KEY,
@@ -268,7 +262,7 @@ class AuditRepository:
                 )
                 """
             )
-            connection.execute(
+            _ = connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS scheduled_message_deletions (
                     chat_id INTEGER NOT NULL,
@@ -278,13 +272,13 @@ class AuditRepository:
                 )
                 """
             )
-            connection.execute(
+            _ = connection.execute(
                 """
                 CREATE INDEX IF NOT EXISTS idx_scheduled_message_deletions_due
                 ON scheduled_message_deletions(due_at)
                 """
             )
-            connection.execute(
+            _ = connection.execute(
                 """
                 CREATE INDEX IF NOT EXISTS idx_webhook_updates_processed_at
                 ON webhook_updates(status, processed_at)
@@ -312,7 +306,7 @@ class AuditRepository:
             }, ensure_ascii=False,
         )
         with closing(self._connect()) as connection:
-            connection.execute(
+            _ = connection.execute(
                 """
                 INSERT INTO moderation_events (
                     chat_id, message_id, user_id, username, raw_text, normalized_text,
@@ -332,10 +326,13 @@ class AuditRepository:
                 ),
             )
             connection.commit()
-            return int(connection.execute(
+            row = connection.execute(
                 "SELECT id FROM moderation_events WHERE chat_id=%s AND message_id=%s",
                 (incoming.chat_id, incoming.message_id),
-            ).fetchone()[0])
+            ).fetchone()
+            if row is None:
+                raise RuntimeError("Saved moderation event was not found")
+            return database_integer(row[0])
 
     def set_moderation_review_message(self, event_id: int, chat_id: int, review_message_id: int) -> bool:
         with closing(self._connect()) as connection:
@@ -350,7 +347,7 @@ class AuditRepository:
     def claim_moderation_review(self, event_id: int, chat_id: int, now: str) -> ModerationReviewTarget | None:
         """Atomically reserve one pending moderation card for an administrator decision."""
         with closing(self._connect()) as connection:
-            connection.execute("BEGIN IMMEDIATE")
+            _ = connection.execute("BEGIN IMMEDIATE")
             cursor = connection.execute(
                 """UPDATE moderation_events SET review_status=%s,updated_at=%s
                 WHERE id=%s AND chat_id=%s AND action=%s AND review_status=%s""",
@@ -366,7 +363,7 @@ class AuditRepository:
             connection.commit()
         if row is None:
             return None
-        return ModerationReviewTarget(event_id, chat_id, int(row[0]), int(row[1]))
+        return ModerationReviewTarget(event_id, chat_id, database_integer(row[0]), database_integer(row[1]))
 
     def complete_moderation_review(
         self,
@@ -388,32 +385,32 @@ class AuditRepository:
 
     def reopen_moderation_review(self, event_id: int, chat_id: int, now: str) -> None:
         with closing(self._connect()) as connection:
-            connection.execute(
+            _ = connection.execute(
                 """UPDATE moderation_events SET review_status=%s,updated_at=%s
                 WHERE id=%s AND chat_id=%s AND review_status=%s""",
                 (ReviewStatus.PENDING.value, now, event_id, chat_id, "resolving"),
             )
             connection.commit()
 
-    def query_all(self, sql: str, parameters: tuple[object, ...] | list[object] = ()) -> list[dict[str, object]]:
+    def query_all(self, sql: LiteralString, parameters: tuple[object, ...] | list[object] = ()) -> list[dict[str, object]]:
         """Execute a read query and return portable mapping rows for the audit API."""
         with closing(self._connect()) as connection:
             cursor = connection.execute(sql, parameters)
-            columns = [column[0] for column in cursor.description or ()]
+            columns = cursor.columns
             return [dict(zip(columns, row, strict=True)) for row in cursor.fetchall()]
 
     def query_one(
-        self, sql: str, parameters: tuple[object, ...] | list[object] = ()
+        self, sql: LiteralString, parameters: tuple[object, ...] | list[object] = ()
     ) -> dict[str, object] | None:
         with closing(self._connect()) as connection:
             cursor = connection.execute(sql, parameters)
             row = cursor.fetchone()
             if row is None:
                 return None
-            columns = [column[0] for column in cursor.description or ()]
+            columns = cursor.columns
             return dict(zip(columns, row, strict=True))
 
-    def execute_write(self, sql: str, parameters: tuple[object, ...] | list[object] = ()) -> int:
+    def execute_write(self, sql: LiteralString, parameters: tuple[object, ...] | list[object] = ()) -> int:
         with closing(self._connect()) as connection:
             cursor = connection.execute(sql, parameters)
             connection.commit()
@@ -428,7 +425,7 @@ class AuditRepository:
 
     def set_assistant_memory_enabled(self, chat_id: int, user_id: int, enabled: bool, now: str) -> None:
         with closing(self._connect()) as connection:
-            connection.execute(
+            _ = connection.execute(
                 """
                 INSERT INTO assistant_memory_preferences(chat_id, user_id, memory_enabled, updated_at)
                 VALUES (%s, %s, %s, %s)
@@ -441,7 +438,7 @@ class AuditRepository:
 
     def remember_assistant_fact(self, chat_id: int, user_id: int, content: str, now: str) -> None:
         with closing(self._connect()) as connection:
-            connection.execute(
+            _ = connection.execute(
                 """
                 INSERT INTO assistant_user_memories(chat_id, user_id, content, created_at, updated_at)
                 VALUES (%s, %s, %s, %s, %s)
@@ -482,7 +479,7 @@ class AuditRepository:
         self, chat_id: int, user_id: int, role: str, content: str, now: str, keep: int = 12
     ) -> None:
         with closing(self._connect()) as connection:
-            connection.execute(
+            _ = connection.execute(
                 """
                 INSERT INTO assistant_sessions(chat_id, user_id, created_at, updated_at)
                 VALUES (%s, %s, %s, %s)
@@ -490,14 +487,14 @@ class AuditRepository:
                 """,
                 (chat_id, user_id, now, now),
             )
-            connection.execute(
+            _ = connection.execute(
                 """
                 INSERT INTO assistant_messages(chat_id, user_id, role, content, created_at)
                 VALUES (%s, %s, %s, %s, %s)
                 """,
                 (chat_id, user_id, role, content, now),
             )
-            connection.execute(
+            _ = connection.execute(
                 """
                 DELETE FROM assistant_messages
                 WHERE chat_id=%s AND user_id=%s AND id NOT IN (
@@ -512,12 +509,12 @@ class AuditRepository:
     def claim_webhook_update(self, update_id: int, now: str, stale_before: str) -> str:
         """Claim one Telegram update; a stale lease may be safely retried."""
         with closing(self._connect()) as connection:
-            connection.execute("BEGIN IMMEDIATE")
+            _ = connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(
                 "SELECT status, leased_at FROM webhook_updates WHERE update_id=%s", (update_id,)
             ).fetchone()
             if row is None:
-                connection.execute(
+                _ = connection.execute(
                     "INSERT INTO webhook_updates(update_id, status, leased_at) VALUES (%s, 'processing', %s)",
                     (update_id, now),
                 )
@@ -527,7 +524,7 @@ class AuditRepository:
             elif str(row[1]) > stale_before:
                 result = "busy"
             else:
-                connection.execute(
+                _ = connection.execute(
                     "UPDATE webhook_updates SET status='processing', leased_at=%s, processed_at=NULL WHERE update_id=%s",
                     (now, update_id),
                 )
@@ -536,13 +533,13 @@ class AuditRepository:
             return result
 
     def complete_webhook_update(self, update_id: int, now: str) -> None:
-        self.execute_write(
+        _ = self.execute_write(
             "UPDATE webhook_updates SET status='processed', processed_at=%s WHERE update_id=%s",
             (now, update_id),
         )
 
     def release_webhook_update(self, update_id: int) -> None:
-        self.execute_write("DELETE FROM webhook_updates WHERE update_id=%s AND status='processing'", (update_id,))
+        _ = self.execute_write("DELETE FROM webhook_updates WHERE update_id=%s AND status='processing'", (update_id,))
 
     def prune_webhook_updates(self, processed_before: str, processing_before: str) -> int:
         """Bound completed records and abandoned processing leases.
@@ -564,7 +561,7 @@ class AuditRepository:
             return int(cursor.rowcount)
 
     def schedule_message_deletion(self, chat_id: int, message_id: int, due_at: str) -> None:
-        self.execute_write(
+        _ = self.execute_write(
             """
             INSERT INTO scheduled_message_deletions(chat_id, message_id, due_at)
             VALUES (%s, %s, %s)
@@ -609,7 +606,7 @@ class AuditRepository:
     def complete_message_deletion(
         self, chat_id: int, message_id: int, claimed_until: str
     ) -> None:
-        self.execute_write(
+        _ = self.execute_write(
             """
             DELETE FROM scheduled_message_deletions
             WHERE chat_id=%s AND message_id=%s AND due_at=%s
@@ -627,7 +624,7 @@ class AuditRepository:
 
     def block_user(self, user_id: int, reason: str, created_at: str) -> None:
         with closing(self._connect()) as connection:
-            connection.execute(
+            _ = connection.execute(
                 """
                 INSERT INTO blocked_indicators(indicator_type, indicator_value, reason, created_at)
                 VALUES ('telegram_user_id', %s, %s, %s)
@@ -705,7 +702,7 @@ class AuditRepository:
         now: str,
     ) -> None:
         with closing(self._connect()) as connection:
-            connection.execute(
+            _ = connection.execute(
                 """
                 INSERT INTO join_request_events(
                     chat_id,user_id,requested_at,display_name,username,invite_link,
@@ -766,7 +763,7 @@ class AuditRepository:
         now: str,
     ) -> None:
         with closing(self._connect()) as connection:
-            connection.execute(
+            _ = connection.execute(
                 """
                 UPDATE join_request_events SET decision=%s,reason=%s,updated_at=%s
                 WHERE chat_id=%s AND user_id=%s AND requested_at=%s
@@ -786,7 +783,7 @@ class AuditRepository:
             ).fetchone()
         if row is None:
             return "normal", None, None, None
-        return str(row[0]), row[1], row[2], row[3]
+        return str(row[0]), _optional_timestamp(row[1]), _optional_timestamp(row[2]), _optional_timestamp(row[3])
 
     def save_join_guard_state(
         self,
@@ -797,7 +794,7 @@ class AuditRepository:
         now: str,
     ) -> None:
         with closing(self._connect()) as connection:
-            connection.execute(
+            _ = connection.execute(
                 """
                 INSERT INTO join_guard_state(
                     chat_id,mode,defense_until,last_attack_at,updated_at
@@ -914,7 +911,7 @@ class AuditRepository:
                 """,
                 ("direct_join", OnboardingState.VERIFICATION_PENDING.value),
             ).fetchall()
-        return [(int(row[0]), int(row[1]), row[2]) for row in rows]
+        return [(database_integer(row[0]), database_integer(row[1]), _optional_text(row[2])) for row in rows]
 
     def undelivered_group_challenges(
         self, retry_before: str, delivery_deadline: str
@@ -942,7 +939,7 @@ class AuditRepository:
                     delivery_deadline,
                 ),
             ).fetchall()
-        return [(int(row[0]), int(row[1]), row[2], str(row[3])) for row in rows]
+        return [(database_integer(row[0]), database_integer(row[1]), _optional_text(row[2]), str(row[3])) for row in rows]
 
     def create_group_challenge(
         self,
@@ -978,7 +975,7 @@ class AuditRepository:
                 connection.commit()
             return cursor.rowcount == 1
         with closing(self._connect()) as connection:
-            connection.execute(
+            _ = connection.execute(
                 """
                 INSERT INTO member_onboarding(
                     chat_id, user_id, user_chat_id, username, verification_flow, state,
@@ -1035,7 +1032,7 @@ class AuditRepository:
                 ),
             )
             if cursor.rowcount == 1:
-                connection.execute(
+                _ = connection.execute(
                     "DELETE FROM scheduled_message_deletions WHERE chat_id=%s AND message_id=%s",
                     (chat_id, message_id),
                 )
@@ -1059,7 +1056,7 @@ class AuditRepository:
         before anyone can retry them.
         """
         with closing(self._connect()) as connection:
-            connection.execute("BEGIN IMMEDIATE")
+            _ = connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(
                 """
                 SELECT chat_id, user_id, verification_answer_index, verification_attempts,
@@ -1079,10 +1076,10 @@ class AuditRepository:
             if row is None:
                 connection.rollback()
                 return GroupChallengeResolution(None, None, None, False, False, 0)
-            chat_id, user_id, answer_index, attempts = map(int, row[:4])
-            message_id = int(row[4]) if row[4] is not None else None
+            chat_id, user_id, answer_index, attempts = map(database_integer, row[:4])
+            message_id = database_integer(row[4]) if row[4] is not None else None
             if selected_index == answer_index:
-                connection.execute(
+                _ = connection.execute(
                     """
                     UPDATE member_onboarding
                     SET state=%s, updated_at=%s
@@ -1096,7 +1093,7 @@ class AuditRepository:
             used_attempts = attempts + 1
             terminal = used_attempts >= max_attempts
             if terminal:
-                connection.execute(
+                _ = connection.execute(
                     """
                     UPDATE member_onboarding
                     SET state=%s, verification_attempts=%s, updated_at=%s
@@ -1106,14 +1103,14 @@ class AuditRepository:
                 )
             elif next_token_hash is not None:
                 # Protect the old card if a crash interrupts its edit/registration.
-                connection.execute(
+                _ = connection.execute(
                     """INSERT INTO scheduled_message_deletions(chat_id, message_id, due_at)
                     VALUES (%s, %s, %s) ON CONFLICT(chat_id, message_id)
                     DO UPDATE SET due_at=excluded.due_at""",
                     (chat_id, message_id,
                      (datetime.fromisoformat(now) + timedelta(minutes=30)).isoformat()),
                 )
-                connection.execute(
+                _ = connection.execute(
                     """
                     UPDATE member_onboarding
                     SET verification_attempts=%s, verification_token_hash=%s,
@@ -1123,7 +1120,7 @@ class AuditRepository:
                     (used_attempts, next_token_hash, next_answer_index, now, chat_id, user_id),
                 )
             else:
-                connection.execute(
+                _ = connection.execute(
                     """
                     UPDATE member_onboarding SET verification_attempts=%s, updated_at=%s
                     WHERE chat_id=%s AND user_id=%s
@@ -1158,7 +1155,7 @@ class AuditRepository:
             if cursor.rowcount != 1:
                 connection.rollback()
                 return False
-            connection.execute(
+            _ = connection.execute(
                 """INSERT INTO scheduled_message_deletions(chat_id, message_id, due_at)
                 VALUES (%s, %s, %s) ON CONFLICT(chat_id, message_id)
                 DO UPDATE SET due_at=excluded.due_at""",
@@ -1172,7 +1169,7 @@ class AuditRepository:
     ) -> GroupChallengeResolution:
         """Let a group administrator settle one active post-join challenge."""
         with closing(self._connect()) as connection:
-            connection.execute("BEGIN IMMEDIATE")
+            _ = connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(
                 """
                 SELECT chat_id, user_id, verification_attempts, verification_message_id
@@ -1185,10 +1182,10 @@ class AuditRepository:
             if row is None:
                 connection.rollback()
                 return GroupChallengeResolution(None, None, None, False, False, 0)
-            chat_id, user_id, attempts = map(int, row[:3])
-            message_id = int(row[3]) if row[3] is not None else None
+            chat_id, user_id, attempts = map(database_integer, row[:3])
+            message_id = database_integer(row[3]) if row[3] is not None else None
             state = OnboardingState.PENDING_FIRST_MESSAGE if approved else OnboardingState.DECLINED
-            connection.execute(
+            _ = connection.execute(
                 """
                 UPDATE member_onboarding
                 SET state=%s, updated_at=%s
@@ -1202,7 +1199,7 @@ class AuditRepository:
     def finalize_group_challenge(self, chat_id: int, user_id: int, now: str) -> None:
         """Clear replay material only after Telegram completed the member action."""
         with closing(self._connect()) as connection:
-            connection.execute(
+            _ = connection.execute(
                 """
                 UPDATE member_onboarding
                 SET verification_token_hash=NULL, verification_expires_at=NULL,
@@ -1222,7 +1219,7 @@ class AuditRepository:
     def reopen_group_challenge(self, chat_id: int, user_id: int, now: str) -> None:
         """Restore a challenge when the Telegram action failed after its provisional decision."""
         with closing(self._connect()) as connection:
-            connection.execute(
+            _ = connection.execute(
                 """
                 UPDATE member_onboarding SET state=%s, updated_at=%s
                 WHERE chat_id=%s AND user_id=%s AND state IN (%s, %s)
@@ -1246,7 +1243,7 @@ class AuditRepository:
     ) -> tuple[int, int, str] | None:
         """Atomically consume a one-time button token and return its verified join flow."""
         with closing(self._connect()) as connection:
-            connection.execute("BEGIN IMMEDIATE")
+            _ = connection.execute("BEGIN IMMEDIATE")
             row = connection.execute(
                 """
                 SELECT chat_id, user_id, verification_flow FROM member_onboarding
@@ -1258,7 +1255,7 @@ class AuditRepository:
             if row is None:
                 connection.rollback()
                 return None
-            connection.execute(
+            _ = connection.execute(
                 """
                 UPDATE member_onboarding
                 SET state=%s, verification_token_hash=NULL, verification_expires_at=NULL,
@@ -1268,7 +1265,7 @@ class AuditRepository:
                 (OnboardingState.PENDING_FIRST_MESSAGE.value, now, now, row[0], row[1]),
             )
             connection.commit()
-        return int(row[0]), int(row[1]), str(row[2])
+        return database_integer(row[0]), database_integer(row[1]), str(row[2])
 
     def has_current_initial_verification(
         self, token_hash: str, telegram_user_id: int, now: str,
@@ -1307,7 +1304,7 @@ class AuditRepository:
                     "join_request",
                 ),
             ).fetchone()
-        return (int(row[0]), int(row[1])) if row else None
+        return (database_integer(row[0]), database_integer(row[1])) if row else None
 
     def mark_initial_verification_failed(self, chat_id: int, user_id: int, now: str) -> bool:
         """Close a first-stage request after Telegram has rejected it."""
@@ -1389,11 +1386,11 @@ class AuditRepository:
             ).fetchall()
         return [
             (
-                int(row[0]),
-                int(row[1]),
+                database_integer(row[0]),
+                database_integer(row[1]),
                 str(row[2]),
                 OnboardingState(str(row[3])),
-                int(row[4]) if row[4] is not None else None,
+                database_integer(row[4]) if row[4] is not None else None,
             )
             for row in rows
         ]
@@ -1442,7 +1439,7 @@ class AuditRepository:
     ) -> None:
         """Restore a claimed timeout when Telegram could not complete its action."""
         with closing(self._connect()) as connection:
-            connection.execute(
+            _ = connection.execute(
                 """
                 UPDATE member_onboarding
                 SET state=%s, updated_at=%s
@@ -1506,7 +1503,7 @@ class AuditRepository:
     ) -> None:
         """Restore the one-time token only when Telegram could not approve the request."""
         with closing(self._connect()) as connection:
-            connection.execute(
+            _ = connection.execute(
                 """
                 UPDATE member_onboarding
                 SET state=%s, verification_token_hash=%s, verification_expires_at=%s, updated_at=%s
@@ -1649,35 +1646,6 @@ CREATE INDEX IF NOT EXISTS idx_webhook_updates_processed_at
 """
 
 
-class _PostgresConnection:
-    """Minimal SQLite-API compatibility layer for the repository's parameterized SQL."""
-
-    def __init__(self, database_url: str) -> None:
-        try:
-            self._psycopg = import_module("psycopg")
-        except ImportError as error:  # pragma: no cover - exercised in deployment configuration
-            raise RuntimeError("PostgreSQL requires psycopg; install the project dependencies") from error
-        self._connection = self._psycopg.connect(database_url)
-
-    def execute(self, sql: str, parameters: tuple[object, ...] | list[object] = ()) -> Any:
-        if sql.strip() == "BEGIN IMMEDIATE":
-            # SQLite's BEGIN IMMEDIATE serialises subsequent writers.  Take a
-            # transaction-scoped table lock so challenge consumption/expiry keeps
-            # the same one-winner guarantee after moving to PostgreSQL.
-            self._connection.execute("BEGIN")
-            return self._connection.execute("LOCK TABLE member_onboarding IN SHARE ROW EXCLUSIVE MODE")
-        return self._connection.execute(sql.replace("datetime('now')", "NOW()"), parameters)
-
-    def commit(self) -> None:
-        self._connection.commit()
-
-    def rollback(self) -> None:
-        self._connection.rollback()
-
-    def close(self) -> None:
-        self._connection.close()
-
-
 class PostgresAuditRepository(AuditRepository):
     """PostgreSQL implementation of the Bot and audit repository.
 
@@ -1688,24 +1656,28 @@ class PostgresAuditRepository(AuditRepository):
     def __init__(self, database_url: str) -> None:
         if not database_url.startswith(("postgres://", "postgresql://")):
             raise ValueError("DATABASE_URL must be a PostgreSQL URL")
-        self.database_url = database_url
+        self.database_url: str = database_url
         # Kept only for compatibility with code that logs the repository location.
         super().__init__("postgresql")
 
     @property
+    @override
     def is_postgres(self) -> bool:
         return True
 
-    def _connect(self) -> _PostgresConnection:
-        return _PostgresConnection(self.database_url)
+    @override
+    def _connect(self) -> DatabaseConnection:
+        return PostgresConnection(self.database_url)
 
+    @override
     def _json_value(self, value: str) -> object:
         try:
-            json_types = import_module("psycopg.types.json")
+            from psycopg.types.json import Jsonb
         except ImportError as error:  # pragma: no cover - covered by _connect in deployment
             raise RuntimeError("PostgreSQL requires psycopg; install the project dependencies") from error
-        return json_types.Jsonb(json.loads(value))
+        return Jsonb(json.loads(value))
 
+    @override
     def initialize(self) -> None:
         with closing(self._connect()) as connection:
             # Bot and audit-api start independently and can both initialise a
@@ -1713,16 +1685,16 @@ class PostgresAuditRepository(AuditRepository):
             # race-free in that case: concurrent table creation can collide on
             # the internal composite type.  Keep all schema DDL behind one
             # transaction-scoped advisory lock.
-            connection.execute("SELECT pg_advisory_xact_lock(619420431)")
+            _ = connection.execute("SELECT pg_advisory_xact_lock(619420431)")
             # psycopg accepts multiple statements on a simple query, but execute each
             # one separately so this remains safe with prepared-statement settings.
             for statement in POSTGRES_SCHEMA.split(";"):
                 if statement.strip():
-                    connection.execute(statement)
+                    _ = connection.execute(statement)
             for statement in (
                 "ALTER TABLE moderation_events ADD COLUMN IF NOT EXISTS review_message_id BIGINT",
                 "ALTER TABLE moderation_events ADD COLUMN IF NOT EXISTS reviewed_by_user_id BIGINT",
                 "ALTER TABLE moderation_events ADD COLUMN IF NOT EXISTS reviewed_at TIMESTAMPTZ",
             ):
-                connection.execute(statement)
+                _ = connection.execute(statement)
             connection.commit()
